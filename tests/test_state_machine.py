@@ -22,6 +22,7 @@ class StateMachineTests(unittest.TestCase):
     def test_capture_then_follow(self) -> None:
         """Захват пилотом включает экранное сопровождение."""
         self.assertTrue(self.machine.handle(Command.CAPTURE, self.target).accepted)
+        self.assertEqual(self.machine.mode, Mode.CAPTURE)
         result = self.machine.handle(Command.FOLLOW)
         self.assertTrue(result.accepted)
         self.assertEqual(result.mode, Mode.TRACKING)
@@ -31,7 +32,7 @@ class StateMachineTests(unittest.TestCase):
         self.machine.handle(Command.CAPTURE, self.target)
         result = self.machine.handle(Command.AUTOPILOT)
         self.assertFalse(result.accepted)
-        self.assertEqual(result.mode, Mode.TRACKING)
+        self.assertEqual(result.mode, Mode.CAPTURE)
 
     def test_lost_target_needs_new_capture(self) -> None:
         """После потери нельзя продолжить без нового захвата."""

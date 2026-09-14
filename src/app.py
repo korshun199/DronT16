@@ -24,13 +24,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hdmi-x", type=int, default=0, help="X внешнего HDMI-экрана")
     parser.add_argument("--hdmi-y", type=int, default=0, help="Y внешнего HDMI-экрана")
     parser.add_argument("--fullscreen", action="store_true", help="полноэкранный вывод HDMI")
+    parser.add_argument("--capture-size", type=int, default=160, help="размер центральной области захвата")
     return parser.parse_args()
 
 
-def select_target(frame: object) -> TargetBox | None:
-    """Позволяет пилоту выбрать область мышью на текущем кадре."""
-    x, y, width, height = cv2.selectROI("DronT16", frame, showCrosshair=True, fromCenter=False)
-    return TargetBox(float(x), float(y), float(width), float(height)) if width > 0 and height > 0 else None
+def center_target(frame: object, box_size: int) -> TargetBox | None:
+    """Создаёт область захвата по центру кадра без ручного рисования мышью."""
+    height, width = frame.shape[:2]
+    actual_size = min(box_size, width, height)
+    if actual_size <= 0:
+        return None
+    return TargetBox(
+        float(width // 2 - actual_size // 2),
+        float(height // 2 - actual_size // 2),
+        float(actual_size),
+        float(actual_size),
+    )
 
 
 def main() -> int:
@@ -40,6 +49,7 @@ def main() -> int:
     machine = TargetStateMachine()
     tracker = TargetTracker()
     hub = FrameHub()
+    display_mode = Mode.IDLE
     if args.display in ("web", "both"):
         start_web_preview(hub, args.web_host, args.web_port)
     if args.display in ("hdmi", "both"):
@@ -52,13 +62,15 @@ def main() -> int:
     try:
         while True:
             frame = source.read()
-            if machine.mode is Mode.TRACKING and machine.target is not None:
+            if machine.mode in (Mode.CAPTURE, Mode.TRACKING) and machine.target is not None:
                 updated_target = tracker.update(frame)
                 machine.update_target(updated_target)
                 if updated_target is None:
                     message = "TARGET LOST: SELECT AGAIN AND PRESS 1"
-            rendered = draw_overlay(frame, machine.mode, machine.target, message)
-            hub.update(rendered, machine.mode, machine.target, message)
+            if machine.mode is Mode.LOST:
+                display_mode = Mode.LOST
+            rendered = draw_overlay(frame, display_mode, machine.target, message)
+            hub.update(rendered, display_mode, machine.target, message)
             key = -1
             if args.display in ("hdmi", "both"):
                 cv2.imshow("DronT16", rendered)
@@ -66,7 +78,7 @@ def main() -> int:
             if key in (ord("q"), 27):
                 break
             if key == ord("1"):
-                selected = select_target(frame)
+                selected = center_target(frame, args.capture_size)
                 result = machine.handle(Command.CAPTURE, selected)
                 if result.accepted and selected is not None:
                     try:
@@ -78,16 +90,20 @@ def main() -> int:
                         message = result.message
                 else:
                     message = result.message
+                display_mode = machine.mode
             elif key == ord("2"):
                 result = machine.handle(Command.FOLLOW)
                 message = result.message
+                display_mode = machine.mode
             elif key == ord("3"):
                 result = machine.handle(Command.AUTOPILOT)
                 message = result.message
+                display_mode = Mode.DISABLED
             elif key == ord("4"):
                 tracker.reset()
                 result = machine.handle(Command.ABORT)
                 message = result.message
+                display_mode = Mode.IDLE
     finally:
         tracker.reset()
         source.close()

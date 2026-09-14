@@ -11,8 +11,10 @@ class Mode(str, Enum):
     """Состояния прототипа без рабочего автопилота."""
 
     IDLE = "Ожидание"
+    CAPTURE = "Захват"
     TRACKING = "Следить"
     LOST = "Цель потеряна"
+    DISABLED = "Отключено"
 
 
 class Command(str, Enum):
@@ -65,7 +67,7 @@ class TargetStateMachine:
             if target is None or not target.is_valid():
                 return CommandResult(False, self.mode, "CAPTURE REJECTED: invalid target area")
             self.target = target
-            self.mode = Mode.TRACKING
+            self.mode = Mode.CAPTURE
             return CommandResult(True, self.mode, "TARGET CAPTURED")
 
         if command is Command.ABORT:
@@ -86,7 +88,7 @@ class TargetStateMachine:
 
     def update_target(self, target: Optional[TargetBox]) -> None:
         """Обновляет координаты только ранее захваченной цели."""
-        if self.target is None:
+        if self.target is None or self.mode not in (Mode.CAPTURE, Mode.TRACKING):
             return
         if target is None or not target.is_valid():
             self.target = None

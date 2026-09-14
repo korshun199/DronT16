@@ -13,6 +13,7 @@ DISPLAY_MODE="hdmi"
 WEB_HOST="0.0.0.0"
 WEB_PORT="8080"
 HDMI_FULLSCREEN="1"
+CAPTURE_BOX_SIZE="160"
 
 log() {
     # Печатает понятное сообщение текущего шага запуска.
@@ -40,7 +41,7 @@ main() {
         log "Параметры не нужны: все настройки находятся внутри run.sh"
         return 2
     fi
-    local -a app_args=(--source "${VIDEO_SOURCE}" --display "${DISPLAY_MODE}")
+    local -a app_args=(--source "${VIDEO_SOURCE}" --display "${DISPLAY_MODE}" --capture-size "${CAPTURE_BOX_SIZE}")
     if [[ "${DISPLAY_MODE}" == "web" || "${DISPLAY_MODE}" == "both" ]]; then
         app_args+=(--web-host "${WEB_HOST}" --web-port "${WEB_PORT}")
     fi
