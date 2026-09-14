@@ -1,0 +1,21 @@
+# Секреты и production-артефакты защиты
+security/*.v16e
+security/*activation*.json
+security/*.key
+security/*.pem
+security/view
+
+# Сохранённый образец из другого проекта не публикуется
+security_sample/
+SECURITY.md
+
+# Локальные видеозаписи и результаты тестов
+recordings/
+runs/
+*.log
+
+# Локальные настройки и окружения
+.env
+.venv/
+__pycache__/
+*.pyc
