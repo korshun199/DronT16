@@ -1,4 +1,5 @@
 # Секреты и production-артефакты защиты
+security/
 security/*.v16e
 security/*activation*.json
 security/*.key
