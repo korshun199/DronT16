@@ -15,6 +15,7 @@ MODE_LABELS = {
     Mode.TRACKING: "FOLLOW",
     Mode.LOST: "LOST",
     Mode.DISABLED: "DISABLED",
+    Mode.RETURN: "RETURN",
 }
 
 MODE_COLORS = {
@@ -23,6 +24,7 @@ MODE_COLORS = {
     Mode.TRACKING: (0, 220, 0),
     Mode.LOST: (0, 0, 255),
     Mode.DISABLED: (0, 0, 255),
+    Mode.RETURN: (0, 140, 255),
 }
 
 

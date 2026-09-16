@@ -9,8 +9,8 @@ REQUIREMENTS_FILE="${PROJECT_DIR}/requirements-laptop.txt"
 
 # Настройки проекта. Владелец запускает только ./run.sh, параметры меняются здесь.
 VIDEO_SOURCE="auto"
-DISPLAY_MODE="hdmi"
-WEB_HOST="0.0.0.0"
+DISPLAY_MODE="web"
+WEB_HOST="127.0.0.1"
 WEB_PORT="8080"
 HDMI_FULLSCREEN="1"
 CAPTURE_BOX_SIZE="160"

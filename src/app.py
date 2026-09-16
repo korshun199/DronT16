@@ -18,7 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Визуальный прототип DronT16")
     parser.add_argument("--source", default="0", help="индекс камеры или путь к видеофайлу")
     parser.add_argument("--display", choices=("hdmi", "web", "both"), default="hdmi",
-                        help="вывод: HDMI, веб-морда или оба варианта")
+                        help="вывод: веб-морда, HDMI или оба экрана")
     parser.add_argument("--web-host", default="127.0.0.1", help="адрес веб-просмотра")
     parser.add_argument("--web-port", type=int, default=8080, help="порт веб-просмотра")
     parser.add_argument("--hdmi-x", type=int, default=0, help="X внешнего HDMI-экрана")
@@ -77,7 +77,11 @@ def main() -> int:
                 key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
                 break
-            if key == ord("1"):
+            web_command = hub.next_command()
+            key_command = {ord("1"): Command.CAPTURE, ord("2"): Command.FOLLOW,
+                           ord("3"): Command.AUTOPILOT, ord("4"): Command.ABORT}.get(key)
+            command = web_command if web_command is not None else key_command
+            if command == Command.CAPTURE or command == 1:
                 selected = center_target(frame, args.capture_size)
                 result = machine.handle(Command.CAPTURE, selected)
                 if result.accepted and selected is not None:
@@ -91,15 +95,15 @@ def main() -> int:
                 else:
                     message = result.message
                 display_mode = machine.mode
-            elif key == ord("2"):
+            elif command == Command.FOLLOW or command == 2:
                 result = machine.handle(Command.FOLLOW)
                 message = result.message
                 display_mode = machine.mode
-            elif key == ord("3"):
+            elif command == Command.AUTOPILOT or command == 3:
                 result = machine.handle(Command.AUTOPILOT)
                 message = result.message
                 display_mode = Mode.DISABLED
-            elif key == ord("4"):
+            elif command == Command.ABORT or command == 4:
                 tracker.reset()
                 result = machine.handle(Command.ABORT)
                 message = result.message

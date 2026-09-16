@@ -15,6 +15,7 @@ class Mode(str, Enum):
     TRACKING = "Следить"
     LOST = "Цель потеряна"
     DISABLED = "Отключено"
+    RETURN = "Возврат"
 
 
 class Command(str, Enum):

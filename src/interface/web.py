@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from queue import Empty, Queue
 from typing import Any
 
 import cv2
@@ -18,9 +19,17 @@ _PAGE = """<!doctype html>
 img{max-width:100%;height:auto;border:2px solid #555}.status{margin:12px 0}
 code{color:#8f8}</style></head><body><h1>DronT16</h1>
 <div class="status" id="status">Загрузка состояния...</div>
+<div><button onclick="cmd(1)">1 CAPTURE</button>
+<button onclick="cmd(2)">2 FOLLOW</button>
+<button onclick="cmd(3)">3 AUTOPILOT</button>
+<button onclick="cmd(4)">4 ABORT</button></div>
 <img src="/video.mjpg" alt="Видеопоток DronT16">
 <script>setInterval(async()=>{const s=await fetch('/api/status').then(r=>r.json());
-document.getElementById('status').textContent=s.mode+': '+s.message},1000)</script>
+document.getElementById('status').textContent=s.mode+': '+s.message},1000);
+async function cmd(n){await fetch('/api/command/'+n,{method:'POST'})}
+window.addEventListener('keydown', event => {
+  if ('1234'.includes(event.key)) { event.preventDefault(); cmd(event.key); }
+});</script>
 </body></html>"""
 
 
@@ -34,6 +43,18 @@ class FrameHub:
         self._mode = Mode.IDLE
         self._target: TargetBox | None = None
         self._message = "Ожидание видеокадра"
+        self._commands: Queue[int] = Queue()
+
+    def command(self, number: int) -> None:
+        """Кладёт команду веб-кнопки в очередь обработки."""
+        self._commands.put(number)
+
+    def next_command(self) -> int | None:
+        """Возвращает следующую веб-команду или None без ожидания."""
+        try:
+            return self._commands.get_nowait()
+        except Empty:
+            return None
 
     def update(self, frame: Any, mode: Mode, target: TargetBox | None, message: str) -> None:
         """Кодирует и сохраняет последний обработанный кадр."""
@@ -68,8 +89,16 @@ def create_app(hub: FrameHub) -> Flask:
 
     @app.get("/api/status")
     def status() -> Any:
-        """Возвращает JSON-состояние без команд управления."""
+        """Возвращает JSON-состояние веб-морды и текущего режима."""
         return jsonify(hub.snapshot()[1])
+
+    @app.post("/api/command/<int:number>")
+    def command(number: int) -> Any:
+        """Принимает только команды 1..4 от локального тестового интерфейса."""
+        if number not in (1, 2, 3, 4):
+            return jsonify({"error": "unknown command"}), 400
+        hub.command(number)
+        return jsonify({"accepted": True})
 
     @app.get("/video.mjpg")
     def video() -> Response:
@@ -96,4 +125,3 @@ def start_web_preview(hub: FrameHub, host: str, port: int) -> threading.Thread:
     )
     thread.start()
     return thread
-

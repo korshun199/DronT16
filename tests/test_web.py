@@ -21,6 +21,10 @@ class WebPreviewTests(unittest.TestCase):
         status = client.get("/api/status")
         self.assertEqual(status.status_code, 200)
         self.assertEqual(status.json["mode"], Mode.TRACKING.value)
+        command_response = client.post("/api/command/1")
+        self.assertEqual(command_response.status_code, 200)
+        self.assertEqual(hub.next_command(), 1)
+        self.assertEqual(client.post("/api/command/9").status_code, 400)
         self.assertEqual(client.get("/").status_code, 200)
         response = client.get("/video.mjpg", buffered=False)
         try:
