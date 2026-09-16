@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import sys
+import time
 
 import cv2
 
+from src.control.follow_config import load_follow_config
+from src.control.guidance import calculate_guidance
 from src.core.state_machine import Command, Mode, TargetBox, TargetStateMachine
 from src.interface.overlay import draw_overlay
 from src.interface.web import FrameHub, start_web_preview
+from src.protocols.betaflight_msp import BetaflightMsp
 from src.target.tracker import TargetTracker
 from src.video.capture import VideoSource
 
@@ -25,6 +30,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hdmi-y", type=int, default=0, help="Y внешнего HDMI-экрана")
     parser.add_argument("--fullscreen", action="store_true", help="полноэкранный вывод HDMI")
     parser.add_argument("--capture-size", type=int, default=160, help="размер центральной области захвата")
+    parser.add_argument("--follow-config", default="config/follow.json",
+                        help="конфигурация модуля сопровождения")
     return parser.parse_args()
 
 
@@ -45,6 +52,12 @@ def center_target(frame: object, box_size: int) -> TargetBox | None:
 def main() -> int:
     """Запускает цикл видео, обработки команд и экранного сопровождения."""
     args = parse_args()
+    try:
+        follow_config = load_follow_config(args.follow_config)
+        betaflight = BetaflightMsp(follow_config.msp)
+    except ValueError as error:
+        print(f"[DronT16] Ошибка конфигурации сопровождения: {error}", file=sys.stderr)
+        return 2
     source = VideoSource(args.source)
     machine = TargetStateMachine()
     tracker = TargetTracker()
@@ -58,6 +71,26 @@ def main() -> int:
         if args.fullscreen:
             cv2.setWindowProperty("DronT16", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
     message = "1: CAPTURE | 2: FOLLOW | 3: AUTOPILOT | 4: ABORT | Q: EXIT"
+    last_report = 0.0
+
+    def report_guidance(frame: object, target: TargetBox, force: bool = False) -> None:
+        """Печатает координаты цели зелёным, а MSP dry-run красным."""
+        nonlocal last_report
+        now = time.monotonic()
+        if not force and now - last_report < follow_config.guidance.report_period_ms / 1000.0:
+            return
+        result = calculate_guidance(target, frame.shape[1], frame.shape[0], follow_config)
+        green = "\033[32m"
+        red = "\033[31m"
+        reset = "\033[0m"
+        print(
+            f"{green}[TARGET] x={result.target_x:.1f}px y={result.target_y:.1f}px "
+            f"norm=({result.normalized_x:+.3f},{result.normalized_y:+.3f}) "
+            f"angle yaw={result.yaw_error_deg:+.1f}deg pitch={result.pitch_error_deg:+.1f}deg{reset}",
+            flush=True,
+        )
+        print(f"{red}[MSP] {betaflight.format_guidance(result)}{reset}", flush=True)
+        last_report = now
 
     try:
         while True:
@@ -92,6 +125,7 @@ def main() -> int:
                         message = "TRACKER ERROR: TARGET RESET"
                     else:
                         message = result.message
+                        report_guidance(frame, selected, force=True)
                 else:
                     message = result.message
                 display_mode = machine.mode
@@ -99,6 +133,8 @@ def main() -> int:
                 result = machine.handle(Command.FOLLOW)
                 message = result.message
                 display_mode = machine.mode
+                if result.accepted and machine.target is not None:
+                    report_guidance(frame, machine.target, force=True)
             elif command == Command.AUTOPILOT or command == 3:
                 result = machine.handle(Command.AUTOPILOT)
                 message = result.message
@@ -108,6 +144,8 @@ def main() -> int:
                 result = machine.handle(Command.ABORT)
                 message = result.message
                 display_mode = Mode.IDLE
+            if machine.target is not None and machine.mode in (Mode.CAPTURE, Mode.TRACKING):
+                report_guidance(frame, machine.target)
     finally:
         tracker.reset()
         source.close()

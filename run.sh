@@ -14,6 +14,7 @@ WEB_HOST="127.0.0.1"
 WEB_PORT="8080"
 HDMI_FULLSCREEN="1"
 CAPTURE_BOX_SIZE="160"
+FOLLOW_CONFIG="config/follow.json"
 
 log() {
     # Печатает понятное сообщение текущего шага запуска.
@@ -41,7 +42,7 @@ main() {
         log "Параметры не нужны: все настройки находятся внутри run.sh"
         return 2
     fi
-    local -a app_args=(--source "${VIDEO_SOURCE}" --display "${DISPLAY_MODE}" --capture-size "${CAPTURE_BOX_SIZE}")
+    local -a app_args=(--source "${VIDEO_SOURCE}" --display "${DISPLAY_MODE}" --capture-size "${CAPTURE_BOX_SIZE}" --follow-config "${FOLLOW_CONFIG}")
     if [[ "${DISPLAY_MODE}" == "web" || "${DISPLAY_MODE}" == "both" ]]; then
         app_args+=(--web-host "${WEB_HOST}" --web-port "${WEB_PORT}")
     fi
