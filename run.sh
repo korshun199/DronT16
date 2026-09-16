@@ -8,13 +8,20 @@ PYTHON_BIN="${PROJECT_DIR}/.venv/bin/python3"
 REQUIREMENTS_FILE="${PROJECT_DIR}/requirements-laptop.txt"
 
 # Настройки проекта. Владелец запускает только ./run.sh, параметры меняются здесь.
+# Источник видео: auto выбирает подключённую USB-камеру.
 VIDEO_SOURCE="auto"
+# Основной вывод ноутбучной модели: веб-морда, HDMI или оба экрана.
 DISPLAY_MODE="web"
+# Адрес локальной веб-морды для просмотра.
 WEB_HOST="127.0.0.1"
+# Порт локальной веб-морды.
 WEB_PORT="8080"
+# Признак полноэкранного HDMI-вывода: 1 — включить.
 HDMI_FULLSCREEN="1"
+# Размер центральной области захвата в пикселях.
 CAPTURE_BOX_SIZE="160"
-FOLLOW_CONFIG="config/follow.json"
+# Конфигурация расчёта сопровождения и безопасного MSP dry-run.
+FOLLOW_CONFIG="config/follow.toml"
 
 log() {
     # Печатает понятное сообщение текущего шага запуска.

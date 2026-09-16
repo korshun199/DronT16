@@ -13,15 +13,16 @@ from flask import Flask, Response, jsonify, render_template_string
 from src.core.state_machine import Mode, TargetBox
 
 
+# Единая HTML-страница локального просмотра и тестовых команд.
 _PAGE = """<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><title>DronT16</title>
 <style>body{background:#111;color:#eee;font:16px sans-serif;margin:20px}
 img{max-width:100%;height:auto;border:2px solid #555}.status{margin:12px 0}
 code{color:#8f8}</style></head><body><h1>DronT16</h1>
 <div class="status" id="status">Загрузка состояния...</div>
-<div><button onclick="cmd(1)">1 CAPTURE</button>
-<button onclick="cmd(2)">2 FOLLOW</button>
-<button onclick="cmd(3)">3 AUTOPILOT</button>
+<div><button onclick="cmd(1)">1 DIRECT</button>
+<button onclick="cmd(2)">2 CAPTURE</button>
+<button onclick="cmd(3)">3 FOLLOW</button>
 <button onclick="cmd(4)">4 ABORT</button></div>
 <img src="/video.mjpg" alt="Видеопоток DronT16">
 <script>setInterval(async()=>{const s=await fetch('/api/status').then(r=>r.json());

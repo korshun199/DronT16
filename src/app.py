@@ -13,7 +13,6 @@ from src.control.guidance import calculate_guidance
 from src.core.state_machine import Command, Mode, TargetBox, TargetStateMachine
 from src.interface.overlay import draw_overlay
 from src.interface.web import FrameHub, start_web_preview
-from src.protocols.betaflight_msp import BetaflightMsp
 from src.target.tracker import TargetTracker
 from src.video.capture import VideoSource
 
@@ -30,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hdmi-y", type=int, default=0, help="Y внешнего HDMI-экрана")
     parser.add_argument("--fullscreen", action="store_true", help="полноэкранный вывод HDMI")
     parser.add_argument("--capture-size", type=int, default=160, help="размер центральной области захвата")
-    parser.add_argument("--follow-config", default="config/follow.json",
+    parser.add_argument("--follow-config", default="config/follow.toml",
                         help="конфигурация модуля сопровождения")
     return parser.parse_args()
 
@@ -54,7 +53,6 @@ def main() -> int:
     args = parse_args()
     try:
         follow_config = load_follow_config(args.follow_config)
-        betaflight = BetaflightMsp(follow_config.msp)
     except ValueError as error:
         print(f"[DronT16] Ошибка конфигурации сопровождения: {error}", file=sys.stderr)
         return 2
@@ -70,26 +68,23 @@ def main() -> int:
         cv2.moveWindow("DronT16", args.hdmi_x, args.hdmi_y)
         if args.fullscreen:
             cv2.setWindowProperty("DronT16", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-    message = "1: CAPTURE | 2: FOLLOW | 3: AUTOPILOT | 4: ABORT | Q: EXIT"
+    message = "1: DIRECT | 2: CAPTURE | 3: FOLLOW | 4: ABORT | Q: EXIT"
     last_report = 0.0
 
-    def report_guidance(frame: object, target: TargetBox, force: bool = False) -> None:
-        """Печатает координаты цели зелёным, а MSP dry-run красным."""
+    def report_guidance(frame: object, target: TargetBox, color: str, force: bool = False) -> None:
+        """Печатает только координаты цели заданным цветом."""
         nonlocal last_report
         now = time.monotonic()
         if not force and now - last_report < follow_config.guidance.report_period_ms / 1000.0:
             return
         result = calculate_guidance(target, frame.shape[1], frame.shape[0], follow_config)
-        green = "\033[32m"
-        red = "\033[31m"
         reset = "\033[0m"
         print(
-            f"{green}[TARGET] x={result.target_x:.1f}px y={result.target_y:.1f}px "
+            f"{color}[TARGET] x={result.target_x:.1f}px y={result.target_y:.1f}px "
             f"norm=({result.normalized_x:+.3f},{result.normalized_y:+.3f}) "
             f"angle yaw={result.yaw_error_deg:+.1f}deg pitch={result.pitch_error_deg:+.1f}deg{reset}",
             flush=True,
         )
-        print(f"{red}[MSP] {betaflight.format_guidance(result)}{reset}", flush=True)
         last_report = now
 
     try:
@@ -111,10 +106,10 @@ def main() -> int:
             if key in (ord("q"), 27):
                 break
             web_command = hub.next_command()
-            key_command = {ord("1"): Command.CAPTURE, ord("2"): Command.FOLLOW,
-                           ord("3"): Command.AUTOPILOT, ord("4"): Command.ABORT}.get(key)
+            key_command = {ord("1"): Command.ABORT, ord("2"): Command.CAPTURE,
+                           ord("3"): Command.FOLLOW, ord("4"): Command.ABORT}.get(key)
             command = web_command if web_command is not None else key_command
-            if command == Command.CAPTURE or command == 1:
+            if command == Command.CAPTURE or command == 2:
                 selected = center_target(frame, args.capture_size)
                 result = machine.handle(Command.CAPTURE, selected)
                 if result.accepted and selected is not None:
@@ -125,27 +120,24 @@ def main() -> int:
                         message = "TRACKER ERROR: TARGET RESET"
                     else:
                         message = result.message
-                        report_guidance(frame, selected, force=True)
+                        report_guidance(frame, selected, "\033[32m", force=True)
                 else:
                     message = result.message
                 display_mode = machine.mode
-            elif command == Command.FOLLOW or command == 2:
+            elif command == Command.FOLLOW or command == 3:
                 result = machine.handle(Command.FOLLOW)
                 message = result.message
                 display_mode = machine.mode
                 if result.accepted and machine.target is not None:
-                    report_guidance(frame, machine.target, force=True)
-            elif command == Command.AUTOPILOT or command == 3:
-                result = machine.handle(Command.AUTOPILOT)
-                message = result.message
-                display_mode = Mode.DISABLED
-            elif command == Command.ABORT or command == 4:
+                    report_guidance(frame, machine.target, "\033[31m", force=True)
+            elif command == Command.ABORT or command in (1, 4):
                 tracker.reset()
                 result = machine.handle(Command.ABORT)
                 message = result.message
                 display_mode = Mode.IDLE
             if machine.target is not None and machine.mode in (Mode.CAPTURE, Mode.TRACKING):
-                report_guidance(frame, machine.target)
+                color = "\033[32m" if machine.mode is Mode.CAPTURE else "\033[31m"
+                report_guidance(frame, machine.target, color)
     finally:
         tracker.reset()
         source.close()

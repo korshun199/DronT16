@@ -9,6 +9,7 @@ import cv2
 from src.core.state_machine import Mode, TargetBox
 
 
+# ASCII-подписи режимов, которые безопасно отображаются на любом шрифте.
 MODE_LABELS = {
     Mode.IDLE: "READY",
     Mode.CAPTURE: "CAPTURE",
@@ -18,6 +19,7 @@ MODE_LABELS = {
     Mode.RETURN: "RETURN",
 }
 
+# Цвета режимов в формате BGR, который использует OpenCV.
 MODE_COLORS = {
     Mode.IDLE: (255, 120, 0),
     Mode.CAPTURE: (0, 220, 255),

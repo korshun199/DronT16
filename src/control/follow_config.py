@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -57,11 +57,12 @@ def _number(section: dict[str, Any], name: str) -> float:
 
 
 def load_follow_config(path: str | Path) -> FollowConfig:
-    """Загружает JSON и проверяет параметры до запуска сопровождения."""
+    """Загружает TOML и проверяет параметры до запуска сопровождения."""
     config_path = Path(path)
     try:
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        with config_path.open("rb") as config_file:
+            raw = tomllib.load(config_file)
+    except (OSError, tomllib.TOMLDecodeError) as error:
         raise ValueError(f"Не удалось прочитать конфигурацию {config_path}: {error}") from error
     try:
         camera = raw["camera"]

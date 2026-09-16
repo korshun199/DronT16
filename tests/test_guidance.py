@@ -14,7 +14,7 @@ class GuidanceTests(unittest.TestCase):
 
     def setUp(self) -> None:
         """Загружает штатную конфигурацию сопровождения."""
-        self.config = load_follow_config(Path("config/follow.json"))
+        self.config = load_follow_config(Path("config/follow.toml"))
 
     def test_center_target_has_zero_command(self) -> None:
         """Цель в центре кадра не требует поворота."""
