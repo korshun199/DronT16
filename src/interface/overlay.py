@@ -46,14 +46,18 @@ def draw_overlay(frame: Any, mode: Mode, target: TargetBox | None, message: str,
         box_size = min(osd.capture_box_size, width, height)
         center_x = round(width * osd.center_x_percent / 100) + osd.center_offset_x
         center_y = round(height * osd.center_y_percent / 100) + osd.center_offset_y
-        left = center_x - box_size // 2
-        top = center_y - box_size // 2
+        # Рамка имеет отдельное смещение относительно перекрестия.
+        box_center_x = center_x + osd.capture_box_offset_x
+        box_center_y = center_y + osd.capture_box_offset_y
+        left = box_center_x - box_size // 2
+        top = box_center_y - box_size // 2
         cv2.rectangle(frame, (left, top), (left + box_size, top + box_size),
                       color, osd.line_thickness)
-        cv2.line(frame, (center_x - osd.crosshair_arm, center_y),
-                 (center_x + osd.crosshair_arm, center_y), color, 1)
-        cv2.line(frame, (center_x, center_y - osd.crosshair_arm),
-                 (center_x, center_y + osd.crosshair_arm), color, 1)
+        # Перекрестие привязано к центру рамки и не отделяется от неё.
+        cv2.line(frame, (box_center_x - osd.crosshair_arm, box_center_y),
+                 (box_center_x + osd.crosshair_arm, box_center_y), color, 1)
+        cv2.line(frame, (box_center_x, box_center_y - osd.crosshair_arm),
+                 (box_center_x, box_center_y + osd.crosshair_arm), color, 1)
         return frame
     left_top = (int(target.x), int(target.y))
     right_bottom = (int(target.x + target.width), int(target.y + target.height))

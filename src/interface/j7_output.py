@@ -96,10 +96,18 @@ class _Plane(ctypes.Structure):
 class J7Output:
     """Выводит BGR-кадры DronT16 в подключённый композитный J7."""
 
-    def __init__(self, device: str = "/dev/dri/card1") -> None:
+    def __init__(self, device: str = "/dev/dri/card1", fit: str = "stretch",
+                 scale_x: float = 1.0, scale_y: float = 1.0,
+                 offset_x: int = 0, offset_y: int = 0) -> None:
         import cv2
 
         self._cv2 = cv2
+        # Параметры геометрии полного изображения на выходе J7.
+        self.fit = fit
+        self.scale_x = scale_x
+        self.scale_y = scale_y
+        self.offset_x = offset_x
+        self.offset_y = offset_y
         self._fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
         self._lib = ctypes.CDLL("libdrm.so.2")
         self._lib.drmSetMaster.argtypes = [ctypes.c_int]
@@ -230,16 +238,30 @@ class J7Output:
             lib.drmModeFreePlaneResources(resources)
 
     def write(self, frame) -> None:
-        """Масштабирует BGR-кадр и обновляет DRM-буфер."""
+        """Масштабирует BGR-кадр по настройкам и обновляет DRM-буфер."""
         cv2 = self._cv2
+        import numpy as np
         height, width = frame.shape[:2]
-        scale = min(self.width / width, self.height / height)
-        target = cv2.resize(frame, (max(1, round(width * scale)), max(1, round(height * scale))), cv2.INTER_AREA)
-        canvas = cv2.copyMakeBorder(
-            target, (self.height - target.shape[0]) // 2, self.height - target.shape[0] - (self.height - target.shape[0]) // 2,
-            (self.width - target.shape[1]) // 2, self.width - target.shape[1] - (self.width - target.shape[1]) // 2,
-            cv2.BORDER_CONSTANT, value=(0, 0, 0),
-        )
+        # Режим stretch сначала заполняет весь кадр J7 без чёрных полей.
+        target = cv2.resize(frame, (self.width, self.height), cv2.INTER_AREA)
+        scaled_width = max(1, round(self.width * self.scale_x))
+        scaled_height = max(1, round(self.height * self.scale_y))
+        target = cv2.resize(target, (scaled_width, scaled_height), cv2.INTER_AREA)
+        # Размещаем масштабированное изображение по центру с ручным смещением.
+        canvas = np.zeros((self.height, self.width, 3), dtype=target.dtype)
+        left = (self.width - scaled_width) // 2 + self.offset_x
+        top = (self.height - scaled_height) // 2 + self.offset_y
+        source_left = max(0, -left)
+        source_top = max(0, -top)
+        destination_left = max(0, left)
+        destination_top = max(0, top)
+        copy_width = min(scaled_width - source_left, self.width - destination_left)
+        copy_height = min(scaled_height - source_top, self.height - destination_top)
+        if copy_width > 0 and copy_height > 0:
+            canvas[destination_top:destination_top + copy_height,
+                   destination_left:destination_left + copy_width] = target[
+                       source_top:source_top + copy_height,
+                       source_left:source_left + copy_width]
         bgra = cv2.cvtColor(canvas, cv2.COLOR_BGR2BGRA)
         bgra[:, :, 3] = 255
         row_bytes = bgra.tobytes()

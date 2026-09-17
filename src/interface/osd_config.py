@@ -44,8 +44,17 @@ class OsdConfig:
     # Ручное смещение центра в пикселях после процентного расчёта.
     center_offset_x: int = 0
     center_offset_y: int = 0
+    # Отдельное смещение центра квадрата захвата относительно перекрестия.
+    capture_box_offset_x: int = 0
+    capture_box_offset_y: int = 0
     # Цвета режимов в формате BGR OpenCV.
     mode_colors: Mapping[Mode, tuple[int, int, int]] | None = None
+    # Режим заполнения и ручная геометрия полного изображения на J7.
+    output_fit: str = "stretch"
+    output_scale_x: float = 1.0
+    output_scale_y: float = 1.0
+    output_offset_x: int = 0
+    output_offset_y: int = 0
 
 
 def load_osd_config(path: str | Path) -> OsdConfig:
@@ -63,6 +72,7 @@ def load_osd_config(path: str | Path) -> OsdConfig:
                 Mode.DISABLED: "disabled", Mode.RETURN: "return",
             }.items()
         }
+        output = raw.get("output", {})
         result = OsdConfig(
             capture_box_size=int(raw["capture_box_size"]),
             crosshair_arm=int(raw["crosshair_arm"]),
@@ -77,7 +87,14 @@ def load_osd_config(path: str | Path) -> OsdConfig:
             center_y_percent=float(raw["center_y_percent"]),
             center_offset_x=int(raw["center_offset_x"]),
             center_offset_y=int(raw["center_offset_y"]),
+            capture_box_offset_x=int(raw.get("capture_box_offset_x", 0)),
+            capture_box_offset_y=int(raw.get("capture_box_offset_y", 0)),
             mode_colors=mode_colors,
+            output_fit=str(output.get("fit", "stretch")),
+            output_scale_x=float(output.get("scale_x", 1.0)),
+            output_scale_y=float(output.get("scale_y", 1.0)),
+            output_offset_x=int(output.get("offset_x", 0)),
+            output_offset_y=int(output.get("offset_y", 0)),
         )
     except (OSError, KeyError, TypeError, ValueError, tomllib.TOMLDecodeError) as error:
         raise ValueError(f"Не удалось прочитать конфигурацию OSD {config_path}: {error}") from error
@@ -94,4 +111,8 @@ def load_osd_config(path: str | Path) -> OsdConfig:
     for color in result.mode_colors.values():
         if len(color) != 3 or any(not 0 <= value <= 255 for value in color):
             raise ValueError("Каждый цвет OSD должен содержать три значения от 0 до 255")
+    if result.output_fit not in {"stretch"}:
+        raise ValueError("output_fit должен быть stretch")
+    if result.output_scale_x <= 0 or result.output_scale_y <= 0:
+        raise ValueError("Масштаб полного изображения должен быть положительным")
     return result

@@ -98,7 +98,11 @@ def main() -> int:
     j7_output = None
     if args.display == "j7":
         from src.interface.j7_output import J7Output
-        j7_output = J7Output(args.j7_device)
+        j7_output = J7Output(
+            args.j7_device, osd_config.output_fit, osd_config.output_scale_x,
+            osd_config.output_scale_y, osd_config.output_offset_x,
+            osd_config.output_offset_y,
+        )
     if args.display in ("hdmi", "both"):
         cv2.namedWindow("DronT16", cv2.WINDOW_NORMAL)
         cv2.moveWindow("DronT16", args.hdmi_x, args.hdmi_y)
