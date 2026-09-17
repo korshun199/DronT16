@@ -27,12 +27,12 @@ send_command() {
     fi
 }
 
-echo -e "${YELLOW}DronT16 SSH-пульт: 1=Прямой, 2=Захватить, 3=Следить, 4=Отбой, q=Выход${RESET}"
+echo -e "${YELLOW}DronT16 SSH-пульт: 1=Свободный, 2=Захватить, 3=Отмена, q=Выход${RESET}"
 echo "Вводи одну цифру и нажимай Enter."
 
 while IFS= read -r command; do
     case "$command" in
-        1|2|3|4)
+        1|2|3)
             send_command "$command"
             ;;
         q|Q)
@@ -42,7 +42,7 @@ while IFS= read -r command; do
         "")
             ;;
         *)
-            echo -e "${RED}Допустимы только 1, 2, 3, 4 или q${RESET}"
+            echo -e "${RED}Допустимы только 1, 2, 3 или q${RESET}"
             ;;
     esac
 done

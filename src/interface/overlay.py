@@ -37,22 +37,23 @@ def draw_overlay(frame: Any, mode: Mode, target: TargetBox | None, message: str,
     # Значения по умолчанию сохраняют совместимость с тестами и старым вызовом.
     osd = config or OsdConfig(160, 12, 2, 4, 0.8, 2, 0.55, 2)
     height, width = frame.shape[:2]
-    color = MODE_COLORS[mode]
-    cv2.putText(frame, MODE_LABELS[mode], (20, 32), cv2.FONT_HERSHEY_SIMPLEX,
-                osd.mode_font_scale, color, osd.mode_font_thickness)
-    cv2.putText(frame, message[:90], (20, height - 20), cv2.FONT_HERSHEY_SIMPLEX,
-                osd.message_font_scale, color, osd.message_font_thickness)
+    # Цвета из конфигурации хранятся в формате BGR OpenCV.
+    colors = osd.mode_colors or MODE_COLORS
+    color = colors[mode]
+    # Текстовые строки отключены: в OSD остаются только графические элементы.
     if target is None:
         # Центральный квадрат показывает область, которая будет захвачена по 2.
         box_size = min(osd.capture_box_size, width, height)
-        left = width // 2 - box_size // 2
-        top = height // 2 - box_size // 2
+        center_x = round(width * osd.center_x_percent / 100) + osd.center_offset_x
+        center_y = round(height * osd.center_y_percent / 100) + osd.center_offset_y
+        left = center_x - box_size // 2
+        top = center_y - box_size // 2
         cv2.rectangle(frame, (left, top), (left + box_size, top + box_size),
                       color, osd.line_thickness)
-        cv2.line(frame, (width // 2 - osd.crosshair_arm, height // 2),
-                 (width // 2 + osd.crosshair_arm, height // 2), color, 1)
-        cv2.line(frame, (width // 2, height // 2 - osd.crosshair_arm),
-                 (width // 2, height // 2 + osd.crosshair_arm), color, 1)
+        cv2.line(frame, (center_x - osd.crosshair_arm, center_y),
+                 (center_x + osd.crosshair_arm, center_y), color, 1)
+        cv2.line(frame, (center_x, center_y - osd.crosshair_arm),
+                 (center_x, center_y + osd.crosshair_arm), color, 1)
         return frame
     left_top = (int(target.x), int(target.y))
     right_bottom = (int(target.x + target.width), int(target.y + target.height))

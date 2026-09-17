@@ -69,7 +69,7 @@ def read_remote_command(control_file: str) -> str | None:
     except (OSError, UnicodeError) as error:
         print(f"[DronT16] Ошибка чтения SSH-команды: {error}", file=sys.stderr, flush=True)
         return None
-    if command not in {"1", "2", "3", "4"}:
+    if command not in {"1", "2", "3"}:
         print(f"[DronT16] Неизвестная SSH-команда: {command!r}", file=sys.stderr, flush=True)
         return None
     return command
@@ -104,7 +104,7 @@ def main() -> int:
         cv2.moveWindow("DronT16", args.hdmi_x, args.hdmi_y)
         if args.fullscreen:
             cv2.setWindowProperty("DronT16", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-    message = "1: DIRECT | 2: CAPTURE | 3: FOLLOW | 4: ABORT | Q: EXIT"
+    message = "1: FREE | 2: CAPTURE | 3: CANCEL | Q: EXIT"
     last_report = 0.0
 
     def report_guidance(frame: object, target: TargetBox, color: str, force: bool = False) -> None:
@@ -145,12 +145,14 @@ def main() -> int:
                 break
             web_command = hub.next_command()
             remote_command = read_remote_command(args.control_file)
+            # На временном SSH-пульте ноутбука используются три положения:
+            # 1 — свободный режим, 2 — захват, 3 — отмена и возврат к 1.
             key_command = {ord("1"): Command.ABORT, ord("2"): Command.CAPTURE,
-                           ord("3"): Command.FOLLOW, ord("4"): Command.ABORT}.get(key)
+                           ord("3"): Command.ABORT}.get(key)
             remote_key_command = ord(remote_command) if remote_command is not None else None
             remote_command_value = (
                 {ord("1"): Command.ABORT, ord("2"): Command.CAPTURE,
-                 ord("3"): Command.FOLLOW, ord("4"): Command.ABORT}.get(remote_key_command)
+                 ord("3"): Command.ABORT}.get(remote_key_command)
                 if remote_key_command is not None else None
             )
             command = (web_command if web_command is not None else
@@ -170,13 +172,13 @@ def main() -> int:
                 else:
                     message = result.message
                 display_mode = machine.mode
-            elif command == Command.FOLLOW or command == 3:
+            elif command == Command.FOLLOW:
                 result = machine.handle(Command.FOLLOW)
                 message = result.message
                 display_mode = machine.mode
                 if result.accepted and machine.target is not None:
                     report_guidance(frame, machine.target, "\033[31m", force=True)
-            elif command == Command.ABORT or command in (1, 4):
+            elif command == Command.ABORT:
                 tracker.reset()
                 result = machine.handle(Command.ABORT)
                 message = result.message
