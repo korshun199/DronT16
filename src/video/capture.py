@@ -47,6 +47,11 @@ class VideoSource:
         """Настраивает EasyCap на MJPG и очередь из одного актуального кадра."""
         # MJPG является рабочим форматом аналогового USB-захвата EasyCap.
         capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        # Полный режим MacroSilicon для NTSC: 720x480 при 25 кадрах в секунду.
+        # Явная фиксация не даёт OpenCV самопроизвольно перейти к 480x320.
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, 720)
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        capture.set(cv2.CAP_PROP_FPS, 25)
         # Не накапливаем задержку из старых кадров в очереди захвата.
         capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
