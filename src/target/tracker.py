@@ -7,6 +7,7 @@ from typing import Any, Optional
 import cv2
 
 from src.core.state_machine import TargetBox
+from src.target.verifier import TargetVerifier
 
 
 def _make_tracker() -> Any:
@@ -31,9 +32,10 @@ def _make_tracker() -> Any:
 class TargetTracker:
     """Сопровождает только область, явно переданную пилотом."""
 
-    def __init__(self) -> None:
+    def __init__(self, verifier: TargetVerifier | None = None) -> None:
         """Создаёт пустой трекер без активной цели."""
         self._tracker: Optional[Any] = None
+        self._verifier = verifier
 
     def start(self, frame: Any, target: TargetBox) -> None:
         """Запускает сопровождение на первом кадре захваченной области."""
@@ -47,6 +49,8 @@ class TargetTracker:
         if initialized is False:
             self._tracker = None
             raise RuntimeError("OpenCV не смог инициализировать сопровождение")
+        if self._verifier is not None:
+            self._verifier.start(frame, target)
 
     def update(self, frame: Any) -> Optional[TargetBox]:
         """Возвращает новую область прежней цели или None при потере."""
@@ -57,9 +61,14 @@ class TargetTracker:
             self._tracker = None
             return None
         x, y, width, height = box
-        return TargetBox(float(x), float(y), float(width), float(height))
+        target = TargetBox(float(x), float(y), float(width), float(height))
+        if self._verifier is not None and not self._verifier.verify(frame, target):
+            self._tracker = None
+            return None
+        return target
 
     def reset(self) -> None:
         """Останавливает текущее сопровождение без выбора новой цели."""
         self._tracker = None
-
+        if self._verifier is not None:
+            self._verifier.reset()

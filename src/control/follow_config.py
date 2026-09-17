@@ -40,12 +40,22 @@ class MspConfig:
 
 
 @dataclass(frozen=True)
+class VerificationConfig:
+    """Параметры проверки, что трекер удерживает исходную цель."""
+
+    enabled: bool
+    min_similarity: float
+    max_bad_frames: int
+
+
+@dataclass(frozen=True)
 class FollowConfig:
     """Полная конфигурация сопровождения."""
 
     camera: CameraConfig
     guidance: GuidanceConfig
     msp: MspConfig
+    verification: VerificationConfig
 
 
 def _number(section: dict[str, Any], name: str) -> float:
@@ -68,6 +78,7 @@ def load_follow_config(path: str | Path) -> FollowConfig:
         camera = raw["camera"]
         guidance = raw["guidance"]
         msp = raw["msp"]
+        verification = raw["verification"]
         result = FollowConfig(
             CameraConfig(
                 _number(camera, "horizontal_fov_deg"),
@@ -88,6 +99,11 @@ def load_follow_config(path: str | Path) -> FollowConfig:
                 str(msp["serial_port"]),
                 int(msp["baudrate"]),
             ),
+            VerificationConfig(
+                bool(verification["enabled"]),
+                _number(verification, "min_similarity"),
+                int(_number(verification, "max_bad_frames")),
+            ),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(f"Ошибка параметров конфигурации {config_path}: {error}") from error
@@ -97,4 +113,8 @@ def load_follow_config(path: str | Path) -> FollowConfig:
         raise ValueError("report_period_ms должен быть положительным")
     if result.msp.transport != "dry-run" or result.msp.enabled:
         raise ValueError("До отдельного разрешения MSP должен оставаться в режиме dry-run")
+    if not 0 < result.verification.min_similarity <= 1:
+        raise ValueError("min_similarity должен быть больше 0 и не больше 1")
+    if result.verification.max_bad_frames <= 0:
+        raise ValueError("max_bad_frames должен быть положительным")
     return result

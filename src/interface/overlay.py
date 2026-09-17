@@ -7,6 +7,7 @@ from typing import Any
 import cv2
 
 from src.core.state_machine import Mode, TargetBox
+from src.interface.osd_config import OsdConfig
 
 
 # ASCII-подписи режимов, которые безопасно отображаются на любом шрифте.
@@ -30,26 +31,34 @@ MODE_COLORS = {
 }
 
 
-def draw_overlay(frame: Any, mode: Mode, target: TargetBox | None, message: str) -> Any:
+def draw_overlay(frame: Any, mode: Mode, target: TargetBox | None, message: str,
+                 config: OsdConfig | None = None) -> Any:
     """Добавляет на кадр ASCII-индикацию без изменения исходного управления."""
+    # Значения по умолчанию сохраняют совместимость с тестами и старым вызовом.
+    osd = config or OsdConfig(160, 12, 2, 4, 0.8, 2, 0.55, 2)
     height, width = frame.shape[:2]
     color = MODE_COLORS[mode]
-    cv2.putText(frame, MODE_LABELS[mode], (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-    cv2.putText(frame, message[:90], (20, height - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+    cv2.putText(frame, MODE_LABELS[mode], (20, 32), cv2.FONT_HERSHEY_SIMPLEX,
+                osd.mode_font_scale, color, osd.mode_font_thickness)
+    cv2.putText(frame, message[:90], (20, height - 20), cv2.FONT_HERSHEY_SIMPLEX,
+                osd.message_font_scale, color, osd.message_font_thickness)
     if target is None:
-        # Центральный квадрат показывает область, которая будет захвачена по 1.
-        box_size = min(160, max(40, min(width, height) // 3))
+        # Центральный квадрат показывает область, которая будет захвачена по 2.
+        box_size = min(osd.capture_box_size, width, height)
         left = width // 2 - box_size // 2
         top = height // 2 - box_size // 2
-        cv2.rectangle(frame, (left, top), (left + box_size, top + box_size), color, 2)
-        cv2.line(frame, (width // 2 - 12, height // 2), (width // 2 + 12, height // 2), color, 1)
-        cv2.line(frame, (width // 2, height // 2 - 12), (width // 2, height // 2 + 12), color, 1)
+        cv2.rectangle(frame, (left, top), (left + box_size, top + box_size),
+                      color, osd.line_thickness)
+        cv2.line(frame, (width // 2 - osd.crosshair_arm, height // 2),
+                 (width // 2 + osd.crosshair_arm, height // 2), color, 1)
+        cv2.line(frame, (width // 2, height // 2 - osd.crosshair_arm),
+                 (width // 2, height // 2 + osd.crosshair_arm), color, 1)
         return frame
     left_top = (int(target.x), int(target.y))
     right_bottom = (int(target.x + target.width), int(target.y + target.height))
     target_center = tuple(int(value) for value in target.center())
     frame_center = (width // 2, height // 2)
-    cv2.rectangle(frame, left_top, right_bottom, color, 2)
-    cv2.line(frame, frame_center, target_center, color, 2)
-    cv2.circle(frame, target_center, 4, color, -1)
+    cv2.rectangle(frame, left_top, right_bottom, color, osd.line_thickness)
+    cv2.line(frame, frame_center, target_center, color, osd.line_thickness)
+    cv2.circle(frame, target_center, osd.target_point_radius, color, -1)
     return frame

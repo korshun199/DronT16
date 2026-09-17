@@ -28,8 +28,12 @@ class VideoSource:
         selected_source = source
         for candidate in sources:
             camera_index = int(candidate) if candidate.isdigit() else None
-            capture = cv2.VideoCapture(camera_index if camera_index is not None else candidate)
+            # Для V4L2 явно выбираем Linux-драйвер, чтобы EasyCap не открывался
+            # через неподходящий универсальный backend OpenCV.
+            capture_target = camera_index if camera_index is not None else candidate
+            capture = cv2.VideoCapture(capture_target, cv2.CAP_V4L2)
             if capture.isOpened():
+                self._configure_v4l2(capture)
                 self.capture = capture
                 selected_source = candidate
                 break
@@ -37,6 +41,14 @@ class VideoSource:
         if self.capture is None:
             raise RuntimeError(f"Не удалось открыть видеопоток: {source}")
         self.source = selected_source
+
+    @staticmethod
+    def _configure_v4l2(capture: cv2.VideoCapture) -> None:
+        """Настраивает EasyCap на MJPG и очередь из одного актуального кадра."""
+        # MJPG является рабочим форматом аналогового USB-захвата EasyCap.
+        capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        # Не накапливаем задержку из старых кадров в очереди захвата.
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     def read(self) -> Any:
         """Возвращает очередной кадр или сообщает об ошибке чтения."""
