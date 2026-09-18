@@ -28,6 +28,10 @@ J7_DEVICE="/dev/dri/by-path/platform-1f00144000.vec-card"
 CONTROL_FILE="/tmp/dront16_command"
 # Запуск CRSF-моста вместе с видеомодулем на Raspberry Pi.
 START_RECEIVER_BRIDGE="1"
+# Запуск симулятора failsafe в этой ветке; команды только текстовые.
+START_FILESAFE_SIMULATOR="1"
+# Конфигурация и журнал симулятора находятся рядом с проектом.
+SIMULATOR_SCRIPT="scripts/simulator_filesafe.py"
 
 log() {
     # Печатает понятное сообщение текущего шага запуска.
@@ -86,6 +90,7 @@ main() {
         fi
     fi
     local bridge_pid=""
+    local simulator_pid=""
     if [[ "${START_RECEIVER_BRIDGE}" == "1" && "${output_mode}" == "j7" ]]; then
         if pgrep -af "scripts/crsf_bridge.py" >/dev/null 2>&1; then
             log "CRSF-мост уже запущен"
@@ -96,10 +101,19 @@ main() {
             sleep 0.3
         fi
     fi
+    if [[ "${START_FILESAFE_SIMULATOR}" == "1" ]]; then
+        log "Запуск simulator_filesafe; команды FC только SIMULATED"
+        python3 "${SIMULATOR_SCRIPT}" &
+        simulator_pid=$!
+    fi
     cleanup() {
         # Останавливаем только мост, запущенный этим экземпляром run.sh.
-        if [[ -n "${bridge_pid}" ]] && kill -0 "${bridge_pid}" 2>/dev/null; then
+        if [[ -n "${bridge_pid:-}" ]] && kill -0 "${bridge_pid}" 2>/dev/null; then
             kill "${bridge_pid}" 2>/dev/null || true
+        fi
+        # Останавливаем только симулятор, запущенный этим экземпляром run.sh.
+        if [[ -n "${simulator_pid:-}" ]] && kill -0 "${simulator_pid}" 2>/dev/null; then
+            kill "${simulator_pid}" 2>/dev/null || true
         fi
     }
     trap cleanup EXIT INT TERM
