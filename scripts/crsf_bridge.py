@@ -64,6 +64,11 @@ def main() -> int:
                     received_frames += 1
                     if frame[2] != frame_type or frame_type != CRSF_RC_CHANNELS_PACKED:
                         continue
+                    # Сначала безусловно передаём исходный RC-кадр в полётник.
+                    # Обработка CH6 не должна влиять на прозрачный мост.
+                    bridge_uart.write_frame(frame)
+                    forwarded_frames += 1
+                    last_rc_time = time.monotonic()
                     # Передаём режим видеомодулю через тот же файл, что и SSH-пульт.
                     channels = unpack_channels(frame[3:-1])
                     selected_mode, changed = mode_decoder.update(channels[mode_channel])
@@ -75,9 +80,6 @@ def main() -> int:
                             f"-> {mode_command} {selected_mode.value}",
                             flush=True,
                         )
-                    bridge_uart.write_frame(frame)
-                    forwarded_frames += 1
-                    last_rc_time = time.monotonic()
                 now = time.monotonic()
                 if now - last_report >= report_period_s:
                     link = "OK" if last_rc_time and now - last_rc_time <= timeout_s else "LOST"
