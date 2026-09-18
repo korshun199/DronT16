@@ -10,3 +10,5 @@ forward_frame_type = 22
 link_timeout_ms = 300
 # Период диагностической строки моста.
 report_period_ms = 500
+# Файл команд режима для видеомодуля.
+control_file = "/tmp/dront16_command"

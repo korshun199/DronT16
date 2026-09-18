@@ -13,7 +13,8 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
-from src.receiver.crsf import CRSF_RC_CHANNELS_PACKED, CrsfReceiver
+from src.receiver.crsf import CRSF_RC_CHANNELS_PACKED, CrsfReceiver, unpack_channels
+from src.receiver.mode import ModeThresholds, ReceiverModeDecoder
 
 
 def load_config() -> dict[str, int | str]:
@@ -31,6 +32,21 @@ def main() -> int:
     frame_type = int(config["forward_frame_type"])
     timeout_s = int(config["link_timeout_ms"]) / 1000.0
     report_period_s = int(config["report_period_ms"]) / 1000.0
+    command_file = Path(str(config.get("control_file", "/tmp/dront16_command")))
+    receiver_config_path = PROJECT_DIR / "config/receiver.toml"
+    with receiver_config_path.open("rb") as config_file:
+        receiver_config = tomllib.load(config_file)
+    mode_config = receiver_config["mode"]
+    mode_channel = int(receiver_config["receiver"]["mode_channel"]) - 1
+    mode_decoder = ReceiverModeDecoder(
+        ModeThresholds(
+            int(mode_config["low_max"]),
+            int(mode_config["high_min"]),
+            int(mode_config["debounce_frames"]),
+        )
+    )
+    if not 0 <= mode_channel < 16:
+        raise ValueError("mode_channel должен быть от 1 до 16")
     buffer = bytearray()
     last_rc_time = 0.0
     last_report = 0.0
@@ -48,6 +64,17 @@ def main() -> int:
                     received_frames += 1
                     if frame[2] != frame_type or frame_type != CRSF_RC_CHANNELS_PACKED:
                         continue
+                    # Передаём режим видеомодулю через тот же файл, что и SSH-пульт.
+                    channels = unpack_channels(frame[3:-1])
+                    selected_mode, changed = mode_decoder.update(channels[mode_channel])
+                    if changed:
+                        mode_command = {"DIRECT": "1", "CAPTURE": "2", "FOLLOW": "3"}[selected_mode.value]
+                        command_file.write_text(mode_command, encoding="ascii")
+                        print(
+                            f"[RX MODE] CH{mode_channel + 1}={channels[mode_channel]} "
+                            f"-> {mode_command} {selected_mode.value}",
+                            flush=True,
+                        )
                     bridge_uart.write_frame(frame)
                     forwarded_frames += 1
                     last_rc_time = time.monotonic()

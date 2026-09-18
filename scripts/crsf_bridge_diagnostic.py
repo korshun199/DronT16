@@ -30,7 +30,7 @@ def color_mode(mode_name: str, label: str) -> str:
     color = {
         "DIRECT": GREEN,
         "CAPTURE": YELLOW,
-        "CANCEL": RED,
+        "FOLLOW": RED,
     }.get(mode_name, CYAN)
     return f"{color}{mode_name} ({label}){RESET}"
 

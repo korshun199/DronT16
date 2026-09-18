@@ -11,7 +11,7 @@ class ReceiverMode(str, Enum):
 
     DIRECT = "DIRECT"
     CAPTURE = "CAPTURE"
-    CANCEL = "CANCEL"
+    FOLLOW = "FOLLOW"
 
 
 @dataclass(frozen=True)
@@ -42,7 +42,7 @@ class ReceiverModeDecoder:
         if channel_value < self.thresholds.low_max:
             return ReceiverMode.DIRECT
         if channel_value >= self.thresholds.high_min:
-            return ReceiverMode.CANCEL
+            return ReceiverMode.FOLLOW
         return ReceiverMode.CAPTURE
 
     def update(self, channel_value: int) -> tuple[ReceiverMode, bool]:
@@ -69,5 +69,5 @@ def mode_label(mode: ReceiverMode) -> str:
     return {
         ReceiverMode.DIRECT: "Свободный",
         ReceiverMode.CAPTURE: "Захватить",
-        ReceiverMode.CANCEL: "Отбой",
+        ReceiverMode.FOLLOW: "Сопровождение",
     }[mode]

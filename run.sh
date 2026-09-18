@@ -26,6 +26,8 @@ FOLLOW_CONFIG="config/follow.toml"
 J7_DEVICE="/dev/dri/by-path/platform-1f00144000.vec-card"
 # Файл команд временного SSH-пульта с ноутбука.
 CONTROL_FILE="/tmp/dront16_command"
+# Запуск CRSF-моста вместе с видеомодулем на Raspberry Pi.
+START_RECEIVER_BRIDGE="1"
 
 log() {
     # Печатает понятное сообщение текущего шага запуска.
@@ -83,8 +85,26 @@ main() {
             app_args+=(--fullscreen)
         fi
     fi
+    local bridge_pid=""
+    if [[ "${START_RECEIVER_BRIDGE}" == "1" && "${output_mode}" == "j7" ]]; then
+        if pgrep -af "scripts/crsf_bridge.py" >/dev/null 2>&1; then
+            log "CRSF-мост уже запущен"
+        else
+            log "Запуск CRSF-моста; команды приёмника будут в этой консоли"
+            "${PROJECT_DIR}/scripts/crsf_bridge.sh" &
+            bridge_pid=$!
+            sleep 0.3
+        fi
+    fi
+    cleanup() {
+        # Останавливаем только мост, запущенный этим экземпляром run.sh.
+        if [[ -n "${bridge_pid}" ]] && kill -0 "${bridge_pid}" 2>/dev/null; then
+            kill "${bridge_pid}" 2>/dev/null || true
+        fi
+    }
+    trap cleanup EXIT INT TERM
     log "Запуск DronT16: камера ${VIDEO_SOURCE}, вывод ${output_mode}"
-    exec "${PYTHON_BIN}" -m src.app "${app_args[@]}"
+    "${PYTHON_BIN}" -m src.app "${app_args[@]}"
 }
 
 main "$@"

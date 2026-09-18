@@ -108,7 +108,7 @@ def main() -> int:
         cv2.moveWindow("DronT16", args.hdmi_x, args.hdmi_y)
         if args.fullscreen:
             cv2.setWindowProperty("DronT16", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-    message = "1: FREE | 2: CAPTURE | 3: CANCEL | Q: EXIT"
+    message = "1: DIRECT | 2: CAPTURE | 3: FOLLOW | Q: EXIT"
     last_report = 0.0
 
     def report_guidance(frame: object, target: TargetBox, color: str, force: bool = False) -> None:
@@ -150,13 +150,13 @@ def main() -> int:
             web_command = hub.next_command()
             remote_command = read_remote_command(args.control_file)
             # На временном SSH-пульте ноутбука используются три положения:
-            # 1 — свободный режим, 2 — захват, 3 — отмена и возврат к 1.
+            # 1 — свободный режим, 2 — захват, 3 — сопровождение.
             key_command = {ord("1"): Command.ABORT, ord("2"): Command.CAPTURE,
-                           ord("3"): Command.ABORT}.get(key)
+                           ord("3"): Command.FOLLOW}.get(key)
             remote_key_command = ord(remote_command) if remote_command is not None else None
             remote_command_value = (
                 {ord("1"): Command.ABORT, ord("2"): Command.CAPTURE,
-                 ord("3"): Command.ABORT}.get(remote_key_command)
+                 ord("3"): Command.FOLLOW}.get(remote_key_command)
                 if remote_key_command is not None else None
             )
             command = (web_command if web_command is not None else
