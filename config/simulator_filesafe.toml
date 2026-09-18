@@ -56,5 +56,13 @@ disarm_channel = 5
 # Низкое raw-значение канала означает немедленный DISARM.
 # На данном передатчике высокий уровень CH5 соответствует ARM.
 disarm_active_max = 700
+# Верхнее raw-значение CH5 подтверждает ARM и разрешает takeover.
+arm_active_min = 1700
+# Канал газа CRSF; CH3 — throttle.
+throttle_channel = 3
+# Минимальное значение газа CRSF; для текущего приёмника это примерно 0%.
+throttle_zero = 191
+# Время плавного сброса газа от сохранённого значения до throttle_zero.
+throttle_ramp_s = 5.0
 # Файл команд от CRSF-моста; реальные порты не используются.
 command_file = "/tmp/simulator_filesafe_command"

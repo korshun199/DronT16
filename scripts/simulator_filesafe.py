@@ -10,21 +10,13 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+# Добавляем корень проекта для общего журнала и единых модулей.
+if str(Path(__file__).resolve().parents[1]) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.diagnostics.journal import Color, EventJournal
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
-
-
-class Color:
-    """ANSI-цвета терминального журнала."""
-
-    RESET = "\033[0m"
-    CYAN = "\033[36m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    RED = "\033[31m"
-    MAGENTA = "\033[35m"
-    BLUE = "\033[34m"
-    WHITE = "\033[37m"
 
 
 class State(str, Enum):
@@ -46,33 +38,6 @@ class Packet:
     heading_deg: float
     altitude_m: float
     speed_m_s: float
-
-
-class Journal:
-    """Дублирует цветной вывод в терминал и обычный текстовый файл."""
-
-    def __init__(self, path: Path, start_time: float) -> None:
-        """Открывает журнал заново и запоминает начало виртуального времени."""
-        self.path = path
-        self.start_time = start_time
-        self.sequence = 0
-        self.file = path.open("w", encoding="utf-8", buffering=1)
-
-    def write(self, category: str, message: str, color: str = Color.WHITE) -> None:
-        """Печатает одну строку с миллисекундной меткой в оба назначения."""
-        elapsed = time.monotonic() - self.start_time
-        minutes = int(elapsed // 60)
-        seconds = elapsed % 60
-        self.sequence += 1
-        stamp = f"[{minutes:02d}:{seconds:06.3f}] [{self.sequence:06d}] [{category}]"
-        plain = f"{stamp} {message}"
-        print(f"{color}{plain}{Color.RESET}", flush=True)
-        self.file.write(plain + "\n")
-        self.file.flush()
-
-    def close(self) -> None:
-        """Закрывает файл журнала."""
-        self.file.close()
 
 
 def load_config() -> dict[str, object]:
@@ -101,7 +66,7 @@ def main() -> int:
     failsafe = config["failsafe"]
     control = config["control"]
     start = time.monotonic()
-    journal = Journal(PROJECT_DIR / str(simulator["log_file"]), start)
+    journal = EventJournal(PROJECT_DIR / str(simulator["log_file"]), "SIM", start)
     duration = float(simulator["duration_s"])
     step = float(simulator["step_ms"]) / 1000.0
     packet_period = float(simulator["packet_period_ms"]) / 1000.0

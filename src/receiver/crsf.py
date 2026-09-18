@@ -1,4 +1,4 @@
-"""Только чтение CRSF-пакетов от ELRS-приёмника через UART."""
+"""Чтение и передача проверенных CRSF-пакетов через UART."""
 
 from __future__ import annotations
 
@@ -43,6 +43,28 @@ def unpack_channels(payload: bytes) -> tuple[int, ...]:
     return tuple((packed >> (11 * index)) & 0x07FF for index in range(16))
 
 
+def pack_channels(channels: tuple[int, ...] | list[int]) -> bytes:
+    """Упаковывает 16 каналов CRSF в стандартные 22 байта по 11 бит."""
+    if len(channels) != 16:
+        raise ValueError("CRSF RC_CHANNELS_PACKED должен содержать 16 каналов")
+    packed = 0
+    for index, value in enumerate(channels):
+        if not 0 <= int(value) <= 0x07FF:
+            raise ValueError(f"Канал CH{index + 1} вне диапазона CRSF: {value}")
+        packed |= int(value) << (11 * index)
+    return packed.to_bytes(22, "little")
+
+
+def rebuild_rc_frame(frame: bytes, channels: tuple[int, ...] | list[int]) -> bytes:
+    """Пересобирает RC-кадр с новыми каналами и корректной CRC8 CRSF."""
+    if len(frame) < 4 or frame[2] != CRSF_RC_CHANNELS_PACKED:
+        raise ValueError("Ожидался кадр CRSF RC_CHANNELS_PACKED")
+    payload = pack_channels(channels)
+    length = len(payload) + 2  # type + payload + CRC
+    body = bytes((frame[0], length, CRSF_RC_CHANNELS_PACKED)) + payload
+    return body + bytes((crc8_dvb_s2(body[2:]),))
+
+
 def extract_raw_frames(buffer: bytearray) -> list[bytes]:
     """Извлекает из буфера полные кадры с корректной CRC."""
     raw_frames: list[bytes] = []
@@ -77,7 +99,7 @@ def parse_frames(buffer: bytearray, now: float | None = None) -> list[ReceiverFr
 
 
 class CrsfReceiver:
-    """Открывает UART только на чтение и принимает RC-кадры CRSF."""
+    """Открывает UART для чтения либо для чтения и передачи CRSF."""
 
     def __init__(self, serial_port: str, baudrate: int, write_enabled: bool = False) -> None:
         """Открывает UART 8N1 на чтение или на чтение и передачу."""
