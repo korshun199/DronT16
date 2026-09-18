@@ -43,10 +43,9 @@ def unpack_channels(payload: bytes) -> tuple[int, ...]:
     return tuple((packed >> (11 * index)) & 0x07FF for index in range(16))
 
 
-def parse_frames(buffer: bytearray, now: float | None = None) -> list[ReceiverFrame]:
-    """Извлекает проверенные RC-кадры из накопленного буфера UART."""
-    frames: list[ReceiverFrame] = []
-    received_at = time.monotonic() if now is None else now
+def extract_raw_frames(buffer: bytearray) -> list[bytes]:
+    """Извлекает из буфера полные кадры с корректной CRC."""
+    raw_frames: list[bytes] = []
     while len(buffer) >= 2:
         length = buffer[1]
         if length < 2 or length > CRSF_MAX_FRAME_LENGTH:
@@ -57,11 +56,19 @@ def parse_frames(buffer: bytearray, now: float | None = None) -> list[ReceiverFr
             break
         frame = bytes(buffer[:total_length])
         del buffer[:total_length]
-        frame_type = frame[2]
-        payload = frame[3:-1]
         if crc8_dvb_s2(frame[2:-1]) != frame[-1]:
             continue
-        if frame_type == CRSF_RC_CHANNELS_PACKED:
+        raw_frames.append(frame)
+    return raw_frames
+
+
+def parse_frames(buffer: bytearray, now: float | None = None) -> list[ReceiverFrame]:
+    """Извлекает проверенные RC-кадры из накопленного буфера UART."""
+    frames: list[ReceiverFrame] = []
+    received_at = time.monotonic() if now is None else now
+    for frame in extract_raw_frames(buffer):
+        if frame[2] == CRSF_RC_CHANNELS_PACKED:
+            payload = frame[3:-1]
             try:
                 frames.append(ReceiverFrame(unpack_channels(payload), received_at))
             except ValueError:
@@ -72,12 +79,14 @@ def parse_frames(buffer: bytearray, now: float | None = None) -> list[ReceiverFr
 class CrsfReceiver:
     """Открывает UART только на чтение и принимает RC-кадры CRSF."""
 
-    def __init__(self, serial_port: str, baudrate: int) -> None:
-        """Открывает UART с параметрами 8N1 без передачи данных."""
+    def __init__(self, serial_port: str, baudrate: int, write_enabled: bool = False) -> None:
+        """Открывает UART 8N1 на чтение или на чтение и передачу."""
         self.serial_port = serial_port
+        self.write_enabled = write_enabled
         # Диагностические счётчики входного потока без передачи данных.
         self.bytes_received = 0
-        self._fd = os.open(serial_port, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+        open_mode = os.O_RDWR if write_enabled else os.O_RDONLY
+        self._fd = os.open(serial_port, open_mode | os.O_NOCTTY | os.O_NONBLOCK)
         settings = termios.tcgetattr(self._fd)
         settings[0] = 0
         settings[1] = 0
@@ -117,6 +126,26 @@ class CrsfReceiver:
             except BlockingIOError:
                 pass
         return parse_frames(buffer)
+
+    def read_raw_frames(self, buffer: bytearray) -> list[bytes]:
+        """Читает UART и возвращает полные CRC-проверенные кадры без изменения."""
+        ready, _, _ = select.select([self._fd], [], [], 0.05)
+        if ready:
+            try:
+                chunk = os.read(self._fd, 4096)
+                buffer.extend(chunk)
+                self.bytes_received += len(chunk)
+            except BlockingIOError:
+                pass
+        return extract_raw_frames(buffer)
+
+    def write_frame(self, frame: bytes) -> None:
+        """Передаёт один неизменённый CRSF-кадр через открытый UART."""
+        if not self.write_enabled:
+            raise RuntimeError("UART открыт только на чтение")
+        sent = 0
+        while sent < len(frame):
+            sent += os.write(self._fd, frame[sent:])
 
     def close(self) -> None:
         """Закрывает UART без отправки байтов в приёмник."""

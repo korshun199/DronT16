@@ -1,0 +1,12 @@
+# Настройки первого моста Raspberry между CRSF-приёмником и Betaflight.
+[bridge]
+# UART Raspberry Pi 5: pin 10 RXD0 принимает, pin 8 TXD0 передаёт.
+serial_port = "/dev/ttyAMA0"
+# Скорость CRSF приёмника и UART1 полётного контроллера.
+baudrate = 420000
+# Передавать только проверенные кадры каналов RC.
+forward_frame_type = 22
+# Остановить передачу после такого таймаута без корректного RC-кадра.
+link_timeout_ms = 300
+# Период диагностической строки моста.
+report_period_ms = 500
