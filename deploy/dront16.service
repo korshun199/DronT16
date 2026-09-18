@@ -1,0 +1,19 @@
+[Unit]
+Description=DronT16 video and receiver bridge
+After=local-fs.target systemd-udev-settle.service
+
+[Service]
+Type=simple
+User=oleg
+Group=oleg
+WorkingDirectory=/home/oleg/DronT16
+ExecStart=/home/oleg/DronT16/run.sh
+Restart=on-failure
+RestartSec=3
+KillMode=control-group
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

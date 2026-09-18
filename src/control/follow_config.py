@@ -41,11 +41,21 @@ class MspConfig:
 
 @dataclass(frozen=True)
 class VerificationConfig:
-    """Параметры проверки, что трекер удерживает исходную цель."""
+    """Параметры проверки и выделения цели на фоне."""
 
     enabled: bool
+    method: str
     min_similarity: float
     max_bad_frames: int
+    adaptation_rate: float
+    foreground_margin_percent: float
+
+
+@dataclass(frozen=True)
+class TrackerConfig:
+    """Выбранный алгоритм движения области цели."""
+
+    algorithm: str
 
 
 @dataclass(frozen=True)
@@ -56,6 +66,7 @@ class FollowConfig:
     guidance: GuidanceConfig
     msp: MspConfig
     verification: VerificationConfig
+    tracker: TrackerConfig
 
 
 def _number(section: dict[str, Any], name: str) -> float:
@@ -101,9 +112,13 @@ def load_follow_config(path: str | Path) -> FollowConfig:
             ),
             VerificationConfig(
                 bool(verification["enabled"]),
+                str(verification.get("method", "appearance")),
                 _number(verification, "min_similarity"),
                 int(_number(verification, "max_bad_frames")),
+                float(verification.get("adaptation_rate", 0.05)),
+                float(verification.get("foreground_margin_percent", 15.0)),
             ),
+            TrackerConfig(str(raw.get("tracker", {}).get("algorithm", "csrt"))),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(f"Ошибка параметров конфигурации {config_path}: {error}") from error
@@ -117,4 +132,12 @@ def load_follow_config(path: str | Path) -> FollowConfig:
         raise ValueError("min_similarity должен быть больше 0 и не больше 1")
     if result.verification.max_bad_frames <= 0:
         raise ValueError("max_bad_frames должен быть положительным")
+    if result.verification.method not in {"appearance", "foreground", "adaptive", "disabled"}:
+        raise ValueError("method должен быть appearance, foreground, adaptive или disabled")
+    if not 0 <= result.verification.adaptation_rate <= 1:
+        raise ValueError("adaptation_rate должен быть от 0 до 1")
+    if not 0 <= result.verification.foreground_margin_percent < 50:
+        raise ValueError("foreground_margin_percent должен быть от 0 до 50")
+    if result.tracker.algorithm not in {"csrt", "kcf", "mil"}:
+        raise ValueError("algorithm должен быть csrt, kcf или mil")
     return result

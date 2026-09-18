@@ -10,38 +10,41 @@ from src.core.state_machine import TargetBox
 from src.target.verifier import TargetVerifier
 
 
-def _make_tracker() -> Any:
-    """Создаёт доступный локальный OpenCV-трекер по приоритету качества."""
+def _make_tracker(algorithm: str = "csrt") -> Any:
+    """Создаёт выбранный локальный OpenCV-трекер."""
+    names = {
+        "csrt": "TrackerCSRT_create",
+        "kcf": "TrackerKCF_create",
+        "mil": "TrackerMIL_create",
+    }
+    selected_name = names.get(algorithm)
+    if selected_name is None:
+        raise ValueError(f"Неизвестный алгоритм трекера: {algorithm}")
     constructors = []
     legacy = getattr(cv2, "legacy", None)
     if legacy is not None:
-        constructors.extend(
-            getattr(legacy, name, None)
-            for name in ("TrackerCSRT_create", "TrackerKCF_create", "TrackerMIL_create")
-        )
-    constructors.extend(
-        getattr(cv2, name, None)
-        for name in ("TrackerCSRT_create", "TrackerKCF_create", "TrackerMIL_create")
-    )
+        constructors.append(getattr(legacy, selected_name, None))
+    constructors.append(getattr(cv2, selected_name, None))
     for constructor in constructors:
         if constructor is not None:
             return constructor()
-    raise RuntimeError("В установленном OpenCV нет подходящего трекера")
+    raise RuntimeError(f"В OpenCV нет трекера {algorithm}")
 
 
 class TargetTracker:
     """Сопровождает только область, явно переданную пилотом."""
 
-    def __init__(self, verifier: TargetVerifier | None = None) -> None:
+    def __init__(self, verifier: TargetVerifier | None = None, algorithm: str = "csrt") -> None:
         """Создаёт пустой трекер без активной цели."""
         self._tracker: Optional[Any] = None
         self._verifier = verifier
+        self._algorithm = algorithm
 
     def start(self, frame: Any, target: TargetBox) -> None:
         """Запускает сопровождение на первом кадре захваченной области."""
         if not target.is_valid():
             raise ValueError("Нельзя начать сопровождение пустой областью")
-        self._tracker = _make_tracker()
+        self._tracker = _make_tracker(self._algorithm)
         initialized = self._tracker.init(
             frame,
             (int(target.x), int(target.y), int(target.width), int(target.height)),

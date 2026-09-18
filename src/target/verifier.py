@@ -13,10 +13,15 @@ from src.core.state_machine import TargetBox
 class TargetVerifier:
     """Сравнивает цветовую структуру и изображение выбранной области."""
 
-    def __init__(self, min_similarity: float = 0.35, max_bad_frames: int = 5) -> None:
+    def __init__(self, min_similarity: float = 0.35, max_bad_frames: int = 5,
+                 method: str = "appearance", adaptation_rate: float = 0.05,
+                 foreground_margin_percent: float = 15.0) -> None:
         """Создаёт проверяющий модуль с порогом и запасом кадров."""
         self.min_similarity = min_similarity
         self.max_bad_frames = max_bad_frames
+        self.method = method
+        self.adaptation_rate = adaptation_rate
+        self.foreground_margin_percent = foreground_margin_percent
         self._template: Any = None
         self._histogram: Any = None
         self._bad_frames = 0
@@ -38,8 +43,9 @@ class TargetVerifier:
         crop = self._crop(frame, target)
         if crop is None or crop.size == 0:
             raise ValueError("Нельзя сохранить пустой образец цели")
-        self._template = cv2.resize(crop, (64, 64), interpolation=cv2.INTER_AREA)
-        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        sample = self._foreground_crop(crop)
+        self._template = cv2.resize(sample, (64, 64), interpolation=cv2.INTER_AREA)
+        hsv = cv2.cvtColor(sample, cv2.COLOR_BGR2HSV)
         self._histogram = cv2.normalize(
             cv2.calcHist([hsv], [0, 1], None, [16, 16], [0, 180, 0, 256]),
             None,
@@ -49,13 +55,46 @@ class TargetVerifier:
         )
         self._bad_frames = 0
 
+    def _foreground_crop(self, crop: Any) -> Any:
+        """Выделяет вероятную переднюю область и подавляет внешний фон."""
+        if self.method != "foreground":
+            return crop
+        height, width = crop.shape[:2]
+        margin_x = int(width * self.foreground_margin_percent / 100.0)
+        margin_y = int(height * self.foreground_margin_percent / 100.0)
+        mask = np.full((height, width), cv2.GC_BGD, dtype=np.uint8)
+        inner_top = margin_y
+        inner_bottom = max(inner_top + 1, height - margin_y)
+        inner_left = margin_x
+        inner_right = max(inner_left + 1, width - margin_x)
+        mask[inner_top:inner_bottom, inner_left:inner_right] = cv2.GC_PR_FGD
+        # Центральная часть области считается наиболее вероятным объектом.
+        center_margin_x = max(1, (inner_right - inner_left) // 5)
+        center_margin_y = max(1, (inner_bottom - inner_top) // 5)
+        mask[inner_top + center_margin_y:inner_bottom - center_margin_y,
+             inner_left + center_margin_x:inner_right - center_margin_x] = cv2.GC_FGD
+        try:
+            background_model = np.zeros((1, 65), dtype=np.float64)
+            foreground_model = np.zeros((1, 65), dtype=np.float64)
+            cv2.grabCut(crop, mask, None, background_model, foreground_model,
+                        2, cv2.GC_INIT_WITH_MASK)
+            foreground = (mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD)
+            if int(foreground.sum()) >= max(16, crop.shape[0] * crop.shape[1] // 20):
+                result = crop.copy()
+                result[~foreground] = 0
+                return result
+        except cv2.error:
+            pass
+        return crop
+
     def verify(self, frame: Any, target: TargetBox) -> bool:
         """Проверяет цветовую и визуальную близость найденной области."""
         crop = self._crop(frame, target)
         if crop is None or self._template is None or self._histogram is None:
             return False
-        resized = cv2.resize(crop, (64, 64), interpolation=cv2.INTER_AREA)
-        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        sample = self._foreground_crop(crop)
+        resized = cv2.resize(sample, (64, 64), interpolation=cv2.INTER_AREA)
+        hsv = cv2.cvtColor(sample, cv2.COLOR_BGR2HSV)
         histogram = cv2.normalize(
             cv2.calcHist([hsv], [0, 1], None, [16, 16], [0, 180, 0, 256]),
             None,
@@ -75,6 +114,12 @@ class TargetVerifier:
             similarity = 0.5 * histogram_score + 0.5 * max(0.0, template_score)
         if similarity >= self.min_similarity:
             self._bad_frames = 0
+            if self.method == "adaptive":
+                # Медленно обновляем образец только после уверенного совпадения.
+                rate = self.adaptation_rate
+                self._template = cv2.addWeighted(self._template, 1.0 - rate, resized, rate, 0)
+                self._histogram = cv2.addWeighted(self._histogram, 1.0 - rate,
+                                                   histogram, rate, 0)
             return True
         self._bad_frames += 1
         return self._bad_frames < self.max_bad_frames

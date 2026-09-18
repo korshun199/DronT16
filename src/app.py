@@ -89,8 +89,11 @@ def main() -> int:
     verifier = TargetVerifier(
         follow_config.verification.min_similarity,
         follow_config.verification.max_bad_frames,
-    ) if follow_config.verification.enabled else None
-    tracker = TargetTracker(verifier)
+        follow_config.verification.method,
+        follow_config.verification.adaptation_rate,
+        follow_config.verification.foreground_margin_percent,
+    ) if follow_config.verification.enabled and follow_config.verification.method != "disabled" else None
+    tracker = TargetTracker(verifier, follow_config.tracker.algorithm)
     hub = FrameHub()
     display_mode = Mode.IDLE
     if args.display in ("web", "both"):
