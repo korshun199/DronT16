@@ -5,7 +5,7 @@ import unittest
 from dataclasses import replace
 
 from src.control.landing import LandingConfig, LandingController, LandingState
-from src.protocols.betaflight_msp_link import MSP_ALTITUDE, MSP_ATTITUDE, MspParser, SensorSample, msp_checksum
+from src.protocols.betaflight_msp_link import MSP_ALTITUDE, MSP_ATTITUDE, MSP_RAW_IMU, MspParser, SensorSample, msp_checksum
 from src.receiver.crsf import CRSF_RC_CHANNELS_PACKED, crc8_dvb_s2, extract_raw_frames, pack_channels, unpack_channels
 
 
@@ -50,6 +50,14 @@ class MspLandingTests(unittest.TestCase):
         samples = parser.feed(attitude[4:], received_at=2.0)
         self.assertEqual(len(samples), 1)
         self.assertFalse(samples[-1].complete)
+
+    def test_msp_parser_reads_raw_magnetometer_axes(self) -> None:
+        """Парсер сохраняет сырые X/Y/Z магнитометра для стендовой записи."""
+        parser = MspParser()
+        raw_imu = response(MSP_RAW_IMU, struct.pack("<hhhhhhhhh", 1, 2, 3, 4, 5, 6, -301, 3, -1010))
+        sample = parser.feed(raw_imu, received_at=4.0)[0]
+        self.assertEqual((sample.mag_x, sample.mag_y, sample.mag_z), (-301, 3, -1010))
+        self.assertAlmostEqual(sample.mag_received_at or 0, 4.0)
 
     def test_msp_freshness_is_checked_per_sensor_type(self) -> None:
         """Свежий крен не маскирует устаревшую высоту."""

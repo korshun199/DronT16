@@ -20,7 +20,6 @@ control_file = "/tmp/dront16_command"
 simulator_control_file = "/tmp/simulator_filesafe_command"
 # Общий append-only журнал моста и симулятора.
 log_file = "simulator_filesafe.log"
-
 [msp]
 # Канал чтения датчиков Betaflight; включён для текущей проверки MSP.
 enabled = true
