@@ -1,7 +1,7 @@
 # DronT16 — система сопровождения цели для FPV-дрона
 
-Статус: основная архитектура утверждена. На ветке `v2_simulator_filesafe`
-реализован стендовый CRSF takeover для проверки с дрона без винтов.
+Статус: основная архитектура утверждена. На ветке `v3_simulator_filesafe`
+реализуется стендовый CRSF takeover и чтение MSP для проверки без винтов.
 Автопилот и команды сопровождения остаются отключёнными.
 
 ## 1. Назначение
@@ -360,7 +360,7 @@ bridge       прозрачная передача проверенных RC-к�
 │   ├── control/guidance.py             # координаты цели и углы направления
 │   ├── control/autopilot.py            # безопасная заглушка автопилота
 │   ├── control/landing.py              # выравнивание и плавное снижение по MSP
-│   ├── protocols/betaflight_msp.py     # адаптер команд сопровождения (dry-run)
+│   ├── protocols/betaflight_msp_link.py # чтение датчиков Betaflight по MSP
 │   ├── protocols/betaflight_msp_link.py # read-only MSP датчики Betaflight
 │   ├── receiver/crsf.py                # безопасное чтение CRSF только на вход
 │   ├── receiver/mode.py                # декодирование CH6 в режимы DronT16
