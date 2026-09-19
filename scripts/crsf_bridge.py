@@ -165,8 +165,18 @@ def main() -> int:
                         level_hold_s=float(landing_config["level_hold_s"]),
                         level_throttle=int(landing_config["level_throttle"]),
                         altitude_hold_gain=float(landing_config["altitude_hold_gain"]),
+                        altitude_hold_integral_gain=float(landing_config["altitude_hold_integral_gain"]),
+                        altitude_hold_vario_gain=float(landing_config["altitude_hold_vario_gain"]),
                         max_altitude_correction=int(landing_config["max_altitude_correction"]),
+                        max_altitude_integral_correction=int(landing_config["max_altitude_integral_correction"]),
                         landing_throttle_barrier=int(landing_config["landing_throttle_barrier"]),
+                        turn_enabled=bool(landing_config["turn_enabled"]),
+                        turn_degrees=float(landing_config["turn_degrees"]),
+                        turn_yaw_command=int(landing_config["turn_yaw_command"]),
+                        turn_timeout_s=float(landing_config["turn_timeout_s"]),
+                        turn_duration_s=float(landing_config["turn_duration_s"]),
+                        turn_heading_tolerance_deg=float(landing_config["turn_heading_tolerance_deg"]),
+                        yaw_channel=int(landing_config["yaw_channel"]) - 1,
                     )
                 )
     except (OSError, ValueError, KeyError, TypeError) as error:

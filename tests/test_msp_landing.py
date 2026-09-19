@@ -2,6 +2,7 @@
 
 import struct
 import unittest
+from dataclasses import replace
 
 from src.control.landing import LandingConfig, LandingController, LandingState
 from src.protocols.betaflight_msp_link import MSP_ALTITUDE, MSP_ATTITUDE, MspParser, SensorSample, msp_checksum
@@ -144,6 +145,68 @@ class MspLandingTests(unittest.TestCase):
         self.assertEqual(result.state, LandingState.LEVELING)
         self.assertTrue(any("descent paused" in event for event in result.events))
         self.assertAlmostEqual(controller.relative_altitude(tilted) or 0, 1.0)
+
+    def test_turn_starts_after_leveling_and_descent_after_turn(self) -> None:
+        """Разворот начинается после выравнивания, а снижение — после разворота."""
+        base = LandingConfig(
+            0, 1, 2, 992, 191, 1792, 0.0, 0.0, 10.0, 100,
+            2.0, 20.0, 191, 0.25, 0.30, 0.15, 1.5, "HOLD", 4, 191,
+            None, 1500,
+        )
+        config = replace(base, turn_enabled=True, turn_degrees=180.0, turn_yaw_command=1300)
+        controller = LandingController(config)
+        channels = [992] * 16
+        channels[2] = 1200
+        current = frame(tuple(channels))
+        level = SensorSample(2.0, 0.0, 0.0, 0.0, 10.0, 0.0, True, True, 0.0, 0.0)
+        controller.process(current, tuple(channels), "LIVE", level, 0.0, armed=True)
+        first = controller.process(current, tuple(channels), "TAKEOVER", level, 0.0, armed=True)
+        self.assertEqual(first.state, LandingState.LEVELING)
+        level_fresh = SensorSample(2.0, 0.0, 0.0, 0.0, 10.0, 0.0, True, True, 2.1, 2.1)
+        turning = controller.process(current, tuple(channels), "TAKEOVER", level_fresh, 2.1, armed=True)
+        self.assertEqual(turning.state, LandingState.TURNING)
+        self.assertEqual(turning.yaw_command, 1300)
+        halfway = SensorSample(2.0, 0.0, 0.0, 0.0, 100.0, 0.0, True, True, 2.2, 2.2)
+        controller.process(turning.output_frame, tuple(unpack_channels(turning.output_frame[3:-1])), "TAKEOVER", halfway, 2.2, armed=True)
+        completed = SensorSample(2.0, 0.0, 0.0, 0.0, 190.0, 0.0, True, True, 2.3, 2.3)
+        turned = controller.process(turning.output_frame, tuple(unpack_channels(turning.output_frame[3:-1])), "TAKEOVER", completed, 2.3, armed=True)
+        self.assertEqual(turned.state, LandingState.LEVELING)
+        self.assertTrue(any("TURNING -> LEVELING" in event for event in turned.events))
+        stable_sample = SensorSample(2.0, 0.0, 0.0, 0.0, 190.0, 0.0, True, True, 2.8, 2.8)
+        stable = controller.process(turned.output_frame, tuple(unpack_channels(turned.output_frame[3:-1])), "TAKEOVER", stable_sample, 2.8, armed=True)
+        self.assertEqual(stable.state, LandingState.LEVELING)
+        descent_sample = SensorSample(2.0, 0.0, 0.0, 0.0, 190.0, 0.0, True, True, 3.5, 3.5)
+        descended = controller.process(stable.output_frame, tuple(unpack_channels(stable.output_frame[3:-1])), "TAKEOVER", descent_sample, 3.5, armed=True)
+        self.assertEqual(descended.state, LandingState.DESCENT)
+
+    def test_altitude_hold_uses_baro_error_integral_and_vario(self) -> None:
+        """Удержание высоты меняет газ по барометру, интегратору и вариометру."""
+        base = LandingConfig(
+            0, 1, 2, 992, 191, 1792, 0.0, 0.0, 10.0, 100,
+            10.0, 20.0, 191, 0.25, 0.30, 0.15, 1.5, "HOLD", 4, 191,
+            None, 1500,
+        )
+        config = replace(
+            base,
+            level_throttle=992,
+            altitude_hold_gain=80.0,
+            altitude_hold_integral_gain=12.0,
+            altitude_hold_vario_gain=35.0,
+            max_altitude_correction=120,
+            max_altitude_integral_correction=80,
+        )
+        controller = LandingController(config)
+        channels = tuple([992] * 16)
+        current = frame(channels)
+        at_hold = SensorSample(10.0, 0.0, 0.0, 0.0, 0.0, 0.0, True, True, 0.0, 0.0)
+        controller.process(current, channels, "LIVE", at_hold, 0.0, armed=True)
+        baseline = controller.process(current, channels, "TAKEOVER", at_hold, 0.0, armed=True)
+        lower = SensorSample(9.5, -0.5, 0.0, 0.0, 0.0, 0.1, True, True, 0.1, 0.1)
+        higher = SensorSample(10.5, 0.5, 0.0, 0.0, 0.0, 0.2, True, True, 0.2, 0.2)
+        lower_result = controller.process(baseline.output_frame, channels, "TAKEOVER", lower, 0.1, armed=True)
+        higher_result = controller.process(lower_result.output_frame, channels, "TAKEOVER", higher, 0.2, armed=True)
+        self.assertGreater(lower_result.throttle_command, 992)
+        self.assertLess(higher_result.throttle_command, lower_result.throttle_command)
 
 
 if __name__ == "__main__":
