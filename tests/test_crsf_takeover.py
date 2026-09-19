@@ -80,6 +80,29 @@ class TakeoverTests(unittest.TestCase):
         self.assertEqual(result.output_kind, "LIVE")
         self.assertTrue(any("BLOCKED" in event for event in result.events))
 
+    def test_takeover_repeats_when_receiver_frame_is_absent(self) -> None:
+        """Во время takeover последний кадр повторяется без нового входного кадра."""
+        first = make_frame(make_channels(throttle=1500))
+        self.process(first)
+        self.process(make_frame(make_channels(ch7=1792)), now=1.0)
+        repeated = self.controller.repeat_without_receiver(1.5)
+        self.assertIsNotNone(repeated)
+        self.assertEqual(repeated.output_kind, "THROTTLE_RAMP_TIMEOUT")
+        self.assertEqual(unpack_channels(repeated.output_frame[3:-1])[2], 1369)
+        self.assertEqual(extract_raw_frames(bytearray(repeated.output_frame)), [repeated.output_frame])
+
+    def test_takeover_holds_throttle_when_landing_controller_is_active(self) -> None:
+        """При посадочном модуле мост не снижает газ самостоятельно."""
+        controller = TakeoverController(
+            TakeoverConfig(6, 1700, 700, 4, 700, 1700, 2, 191, 5.0, False)
+        )
+        first = make_frame(make_channels(throttle=1500))
+        controller.process(first, unpack_channels(first[3:-1]), 0.0)
+        takeover = make_frame(make_channels(ch7=1792, throttle=1700))
+        result = controller.process(takeover, unpack_channels(takeover[3:-1]), 5.0)
+        self.assertEqual(unpack_channels(result.output_frame[3:-1])[2], 1500)
+        self.assertEqual(result.output_kind, "TAKEOVER_HOLD")
+
 
 if __name__ == "__main__":
     unittest.main()

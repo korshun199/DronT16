@@ -29,6 +29,7 @@ class TakeoverConfig:
     throttle_channel: int
     throttle_zero: int
     throttle_ramp_s: float
+    ramp_throttle: bool = True
 
 
 @dataclass(frozen=True)
@@ -94,7 +95,7 @@ class TakeoverController:
                 events.append("сохранен последний полный RC-кадр")
                 return TakeoverResult(
                     self._ramped_frame(current_time),
-                    "THROTTLE_RAMP",
+                    self._output_kind(),
                     self.state,
                     link_lost,
                     disarmed,
@@ -136,7 +137,7 @@ class TakeoverController:
         events.append("RC SUPPRESS: свежий кадр не передан")
         return TakeoverResult(
             self._ramped_frame(current_time),
-            "THROTTLE_RAMP",
+            self._output_kind(),
             self.state,
             link_lost,
             disarmed,
@@ -144,10 +145,12 @@ class TakeoverController:
         )
 
     def _ramped_frame(self, current_time: float) -> bytes:
-        """Формирует сохранённый кадр с плавно уменьшаемым газом."""
+        """Формирует кадр; при посадке сохраняет газ без самостоятельного снижения."""
         if self.frozen_frame is None or self.frozen_channels is None:
             raise RuntimeError("Нет сохранённого кадра для рампы газа")
-        if self.takeover_started_at is None:
+        if not self.config.ramp_throttle:
+            progress = 0.0
+        elif self.takeover_started_at is None:
             progress = 1.0
         elif self.config.throttle_ramp_s <= 0:
             progress = 1.0
@@ -159,3 +162,20 @@ class TakeoverController:
             initial_throttle + (self.config.throttle_zero - initial_throttle) * progress
         )
         return rebuild_rc_frame(self.frozen_frame, channels)
+
+    def _output_kind(self) -> str:
+        """Возвращает понятный тип команды для журнала моста."""
+        return "THROTTLE_RAMP" if self.config.ramp_throttle else "TAKEOVER_HOLD"
+
+    def repeat_without_receiver(self, now: float) -> TakeoverResult | None:
+        """Повторяет сохранённый кадр при временном отсутствии новых RC-кадров."""
+        if self.state is not TakeoverState.TAKEOVER or self.frozen_frame is None:
+            return None
+        return TakeoverResult(
+            self._ramped_frame(now),
+            "THROTTLE_RAMP_TIMEOUT" if self.config.ramp_throttle else "TAKEOVER_HOLD_TIMEOUT",
+            self.state,
+            True,
+            False,
+            ("RC TIMEOUT: повтор сохранённого кадра",),
+        )

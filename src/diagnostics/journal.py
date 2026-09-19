@@ -30,15 +30,22 @@ class EventJournal:
         self.sequence = 0
         self.file = path.open("a", encoding="utf-8", buffering=1)
 
-    def write(self, category: str, message: str, color: str = Color.WHITE) -> None:
-        """Печатает событие с минутами, секундами и миллисекундами."""
+    def write(
+        self,
+        category: str,
+        message: str,
+        color: str = Color.WHITE,
+        console: bool = True,
+    ) -> None:
+        """Пишет событие в файл и при необходимости показывает его в терминале."""
         elapsed = time.monotonic() - self.start_time
         minutes = int(elapsed // 60)
         seconds = elapsed % 60
         self.sequence += 1
         stamp = f"[{minutes:02d}:{seconds:06.3f}] [{self.source}] [{self.sequence:06d}] [{category}]"
         plain = f"{stamp} {message}"
-        print(f"{color}{plain}{Color.RESET}", flush=True)
+        if console:
+            print(f"{color}{plain}{Color.RESET}", flush=True)
         self.file.write(plain + "\n")
         self.file.flush()
 

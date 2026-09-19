@@ -10,6 +10,10 @@ forward_frame_type = 22
 link_timeout_ms = 300
 # Период диагностической строки моста.
 report_period_ms = 500
+# Подробный вывод каждого RC-кадра; false — компактный рабочий журнал.
+verbose_frames = false
+# Показывать SENSOR в терминале; записи в simulator_filesafe.log сохраняются.
+sensor_terminal = false
 # Файл команд режима для видеомодуля.
 control_file = "/tmp/dront16_command"
 # Файл событий тумблера для автономного симулятора failsafe.
@@ -18,9 +22,9 @@ simulator_control_file = "/tmp/simulator_filesafe_command"
 log_file = "simulator_filesafe.log"
 
 [msp]
-# Канал чтения датчиков Betaflight; выключен до подключения отдельного UART.
-enabled = false
-# Отдельный UART Raspberry для FC TX, не совпадающий с CRSF /dev/ttyAMA0.
+# Канал чтения датчиков Betaflight; включён для текущей проверки MSP.
+enabled = true
+# UART1 Raspberry Pi 5 на GPIO0/1: pin 27 TX, pin 28 RX; не CRSF /dev/ttyAMA0.
 serial_port = "/dev/ttyAMA1"
 # Скорость MSP UART полётного контроллера.
 baudrate = 115200
@@ -30,7 +34,7 @@ request_period_ms = 50
 sensor_max_age_ms = 250
 
 [landing]
-# Посадочный контроллер включается только после отдельной проверки MSP-канала.
+# Посадочный контроллер выключен до повторного безопасного теста.
 enabled = false
 # Каналы CRSF: roll CH1, pitch CH2, throttle CH3.
 roll_channel = 1
@@ -50,7 +54,8 @@ max_correction = 250
 # Время выравнивания до начала плавного снижения газа.
 descent_start_after_s = 2.0
 # Скорость снижения команды газа в единицах CRSF за секунду.
-throttle_step_per_s = 80.0
+# Raspberry плавно снижает газ только в режиме LINK_LOST; меньше = медленнее.
+throttle_step_per_s = 40.0
 # Минимальный газ; при его достижении моторы не отключаются автоматически.
 throttle_min = 191
 # Высота и варио для тестового определения посадки по одному барометру.
@@ -59,3 +64,17 @@ landed_vario_abs_m_s = 0.15
 landed_hold_s = 1.5
 # Действие при потере MSP: HOLD оставляет последний безопасный газ.
 fault_action = "HOLD"
+# Канал DISARM для аварийного кадра посадочного автомата.
+disarm_channel = 5
+# Значение CH5 для DISARM на текущем приёмнике.
+disarm_value = 191
+# Канал режима ANGLE/HORIZON; 0 — режим не переключать автоматически.
+stabilization_channel = 0
+# Значение AUX, соответствующее заранее настроенному ANGLE/HORIZON.
+stabilization_value = 1500
+# Допустимое отклонение крена от горизонтали перед снижением.
+level_roll_tolerance_deg = 5.0
+# Допустимое отклонение тангажа от горизонтали перед снижением.
+level_pitch_tolerance_deg = 5.0
+# Сколько секунд дрон должен оставаться выровненным перед снижением.
+level_hold_s = 1.0

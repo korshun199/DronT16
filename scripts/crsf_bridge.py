@@ -53,6 +53,8 @@ def main() -> int:
     frame_type = int(config["forward_frame_type"])
     timeout_s = int(config["link_timeout_ms"]) / 1000.0
     report_period_s = int(config["report_period_ms"]) / 1000.0
+    verbose_frames = bool(config.get("verbose_frames", False))
+    sensor_terminal = bool(config.get("sensor_terminal", False))
     command_file = Path(str(config.get("control_file", "/tmp/dront16_command")))
     simulator_command_file = Path(str(config.get("simulator_control_file", "/tmp/simulator_filesafe_command")))
     log_file = PROJECT_DIR / str(config.get("log_file", "simulator_filesafe.log"))
@@ -101,6 +103,8 @@ def main() -> int:
             throttle_channel=throttle_channel,
             throttle_zero=throttle_zero,
             throttle_ramp_s=throttle_ramp_s,
+            # При посадочном контроллере газ меняет только landing.py.
+            ramp_throttle=not bool(landing_config.get("enabled", False)),
         )
     )
     last_link_lost: bool | None = None
@@ -146,6 +150,17 @@ def main() -> int:
                         landed_vario_abs_m_s=float(landing_config["landed_vario_abs_m_s"]),
                         landed_hold_s=float(landing_config["landed_hold_s"]),
                         fault_action=str(landing_config["fault_action"]),
+                        disarm_channel=int(landing_config["disarm_channel"]) - 1,
+                        disarm_value=int(landing_config["disarm_value"]),
+                        stabilization_channel=(
+                            int(landing_config["stabilization_channel"]) - 1
+                            if int(landing_config["stabilization_channel"]) > 0
+                            else None
+                        ),
+                        stabilization_value=int(landing_config["stabilization_value"]),
+                        level_roll_tolerance_deg=float(landing_config["level_roll_tolerance_deg"]),
+                        level_pitch_tolerance_deg=float(landing_config["level_pitch_tolerance_deg"]),
+                        level_hold_s=float(landing_config["level_hold_s"]),
                     )
                 )
     except (OSError, ValueError, KeyError, TypeError) as error:
@@ -186,14 +201,23 @@ def main() -> int:
                         latest_sensor = sample
                         now_sensor = time.monotonic()
                         if now_sensor - last_sensor_log >= 0.1 and sample.complete:
+                            relative_text = ""
+                            if landing is not None:
+                                relative_altitude = landing.relative_altitude(sample)
+                                if relative_altitude is not None:
+                                    relative_text = f" relative_altitude={relative_altitude:.2f}m"
                             journal.write(
                                 "SENSOR",
                                 f"altitude={sample.altitude_m:.2f}m vario={sample.vario_m_s:.2f}m/s "
-                                f"roll={sample.roll_deg:.1f}deg pitch={sample.pitch_deg:.1f}deg yaw={sample.yaw_deg:.1f}deg",
+                                f"roll={sample.roll_deg:.1f}deg pitch={sample.pitch_deg:.1f}deg yaw={sample.yaw_deg:.1f}deg"
+                                f"{relative_text}",
                                 Color.MAGENTA,
+                                console=sensor_terminal,
                             )
                             last_sensor_log = now_sensor
+                rc_frame_seen = False
                 for frame in bridge_uart.read_raw_frames(buffer):
+                    rc_frame_seen = True
                     received_frames += 1
                     if frame[2] != frame_type or frame_type != CRSF_RC_CHANNELS_PACKED:
                         continue
@@ -249,6 +273,7 @@ def main() -> int:
                             result.state.value,
                             latest_sensor,
                             now,
+                            armed=not result.disarmed,
                         )
                         for event in landing_result.events:
                             category = "SAFETY" if "FAULT" in event else "DECISION"
@@ -262,27 +287,59 @@ def main() -> int:
                                 f"throttle={landing_result.throttle_command} state={landing_result.state.value}",
                                 Color.RED,
                             )
+                        if landing_result.disarm_requested:
+                            journal.write("COMMAND", "FC RC CH5 DISARM; MOTORS OFF", Color.RED)
                     bridge_uart.write_frame(output_frame)
                     forwarded_frames += 1
                     last_rc_time = now
                     if result.output_kind == "THROTTLE_RAMP":
                         frozen_frames += 1
                         output_channels = unpack_channels(result.output_frame[3:-1])
-                        journal.write(
-                            "THROTTLE RAMP",
-                            f"frame={frozen_frames} CH{throttle_channel + 1}={output_channels[throttle_channel]} "
-                            f"target={throttle_zero} state={result.state.value}",
-                            Color.RED,
-                        )
+                        if verbose_frames:
+                            journal.write(
+                                "THROTTLE RAMP",
+                                f"frame={frozen_frames} CH{throttle_channel + 1}={output_channels[throttle_channel]} "
+                                f"target={throttle_zero} state={result.state.value}",
+                                Color.RED,
+                            )
                     elif result.output_kind == "DISARM":
                         journal.write("DISARM", "FC TX: CH5 DISARM; MOTORS OFF; live channel restored", Color.RED)
                     else:
                         live_frames += 1
-                    journal.write(
-                        "FORWARD",
-                        f"kind={result.output_kind} received={received_frames} forwarded={forwarded_frames}",
-                        Color.BLUE,
-                    )
+                    if verbose_frames:
+                        journal.write(
+                            "FORWARD",
+                            f"kind={result.output_kind} received={received_frames} forwarded={forwarded_frames}",
+                            Color.BLUE,
+                        )
+                # При TAKEOVER повторяем сохранённый кадр даже при временном
+                # отсутствии новых байтов от приёмника.
+                timeout_result = takeover.repeat_without_receiver(time.monotonic()) if not rc_frame_seen else None
+                if timeout_result is not None:
+                    output_frame = timeout_result.output_frame
+                    if landing is not None:
+                        timeout_landing = landing.process(
+                            output_frame,
+                            unpack_channels(output_frame[3:-1]),
+                            timeout_result.state.value,
+                            latest_sensor,
+                            time.monotonic(),
+                            armed=True,
+                        )
+                        for event in timeout_landing.events:
+                            journal.write("SAFETY" if "FAULT" in event else "DECISION", event, Color.RED)
+                        output_frame = timeout_landing.output_frame
+                        if timeout_landing.disarm_requested:
+                            journal.write("COMMAND", "FC RC CH5 DISARM; MOTORS OFF", Color.RED)
+                    bridge_uart.write_frame(output_frame)
+                    forwarded_frames += 1
+                    frozen_frames += 1
+                    if frozen_frames % 10 == 0:
+                        journal.write(
+                            "FROZEN TX",
+                            f"timeout повтор сохранённого кадра={frozen_frames}",
+                            Color.RED,
+                        )
                 now = time.monotonic()
                 if now - last_report >= report_period_s:
                     link = "OK" if last_rc_time and now - last_rc_time <= timeout_s else "LOST"

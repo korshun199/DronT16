@@ -47,11 +47,24 @@ class SensorSample:
     received_at: float
     altitude_valid: bool
     attitude_valid: bool
+    altitude_received_at: float | None = None
+    attitude_received_at: float | None = None
 
     @property
     def complete(self) -> bool:
         """Возвращает True, если высота и наклон доступны одновременно."""
         return self.altitude_valid and self.attitude_valid
+
+    def is_fresh(self, now: float, max_age_s: float) -> bool:
+        """Проверяет свежесть каждого обязательного типа датчиков отдельно."""
+        if max_age_s < 0:
+            return False
+        if not self.complete or self.altitude_received_at is None or self.attitude_received_at is None:
+            return False
+        return (
+            now - self.altitude_received_at <= max_age_s
+            and now - self.attitude_received_at <= max_age_s
+        )
 
 
 class MspParser:
@@ -122,6 +135,8 @@ class MspParser:
             received_at=now,
             altitude_valid=self.altitude_m is not None and self.last_altitude_at is not None,
             attitude_valid=self.roll_deg is not None and self.last_attitude_at is not None,
+            altitude_received_at=self.last_altitude_at,
+            attitude_received_at=self.last_attitude_at,
         )
 
 
