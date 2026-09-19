@@ -63,7 +63,7 @@ class MspLandingTests(unittest.TestCase):
 
     def test_landing_levels_and_ramps_throttle(self) -> None:
         """Посадка корректирует наклон и медленно снижает газ с заданной скоростью."""
-        config = LandingConfig(0, 1, 2, 992, 191, 1792, 0.0, 0.0, 18.0, 250, 2.0, 40.0, 191, 0.25, 0.30, 0.15, 1.5, "HOLD", 4, 191, None, 1500)
+        config = LandingConfig(0, 1, 2, 992, 191, 1792, 0.0, 0.0, 18.0, 250, 2.0, 20.0, 191, 0.25, 0.30, 0.15, 1.5, "HOLD", 4, 191, None, 1500)
         controller = LandingController(config)
         channels = [992] * 16
         channels[0] = 1200
@@ -77,7 +77,7 @@ class MspLandingTests(unittest.TestCase):
         second_sample = SensorSample(2.5, 0.0, 5.0, -2.0, 0.0, 2.1, True, True, 2.1, 2.1)
         second = controller.process(current, tuple(channels), "TAKEOVER", second_sample, 2.1)
         self.assertEqual(second.state, LandingState.DESCENT)
-        self.assertEqual(second.throttle_command, 1416)
+        self.assertEqual(second.throttle_command, 1458)
 
     def test_stale_sensor_enters_fault_without_new_descent(self) -> None:
         """Устаревший MSP-образец переводит автомат в FAULT."""
@@ -107,9 +107,28 @@ class MspLandingTests(unittest.TestCase):
         config = LandingConfig(0, 1, 2, 992, 191, 1792, 0.0, 0.0, 10.0, 100, 1.0, 50.0, 191, 0.25, 0.30, 0.15, 1.5, "HOLD", 4, 191, 7, 1792)
         controller = LandingController(config)
         channels = tuple([992] * 16)
-        sample = SensorSample(2.0, 0.0, 0.0, 0.0, 0.0, 0.0, True, True, 0.0, 0.0)
+        sample = SensorSample(2.0, 0.0, 0.0, 0.0, 0.0, 0.0, True, True, 31.0, 31.0)
         result = controller.process(frame(channels), channels, "TAKEOVER", sample, 0.0)
         self.assertEqual(unpack_channels(result.output_frame[3:-1])[7], 1792)
+
+    def test_landing_throttle_barrier_switches_to_minimum(self) -> None:
+        """При пересечении барьера газ резко переходит в минимум."""
+        config = LandingConfig(
+            0, 1, 2, 992, 191, 1792, 0.0, 0.0, 10.0, 100,
+            0.0, 20.0, 191, 0.25, 0.30, 0.15, 1.5, "HOLD", 4, 191,
+            None, 1500, 0.0, 0.0, 0.0, 600,
+        )
+        controller = LandingController(config)
+        channels = [992] * 16
+        channels[2] = 1200
+        current = frame(tuple(channels))
+        sample = SensorSample(2.0, 0.0, 0.0, 0.0, 0.0, 0.0, True, True, 31.0, 31.0)
+        controller.process(current, tuple(channels), "LIVE", sample, 0.0, armed=True)
+        first = controller.process(current, tuple(channels), "TAKEOVER", sample, 0.0, armed=True)
+        second = controller.process(first.output_frame, tuple(unpack_channels(first.output_frame[3:-1])), "TAKEOVER", sample, 31.0, armed=True)
+        self.assertEqual(second.state, LandingState.LANDED)
+        self.assertEqual(second.throttle_command, 191)
+        self.assertTrue(any("throttle barrier" in event for event in second.events))
 
     def test_arm_captures_altitude_zero_and_tilt_pauses_descent(self) -> None:
         """ARM фиксирует ноль, а наклон не позволяет начать снижение."""

@@ -121,6 +121,8 @@ def main() -> int:
     landing: LandingController | None = None
     latest_sensor: SensorSample | None = None
     last_sensor_log = 0.0
+    last_repetitive_event_log = 0.0
+    last_command_log = 0.0
 
     try:
         if bool(msp_config.get("enabled", False)):
@@ -161,6 +163,10 @@ def main() -> int:
                         level_roll_tolerance_deg=float(landing_config["level_roll_tolerance_deg"]),
                         level_pitch_tolerance_deg=float(landing_config["level_pitch_tolerance_deg"]),
                         level_hold_s=float(landing_config["level_hold_s"]),
+                        level_throttle=int(landing_config["level_throttle"]),
+                        altitude_hold_gain=float(landing_config["altitude_hold_gain"]),
+                        max_altitude_correction=int(landing_config["max_altitude_correction"]),
+                        landing_throttle_barrier=int(landing_config["landing_throttle_barrier"]),
                     )
                 )
     except (OSError, ValueError, KeyError, TypeError) as error:
@@ -172,11 +178,19 @@ def main() -> int:
         """Передаёт текстовое событие симулятору failsafe."""
         simulator_command_file.write_text(event, encoding="ascii")
 
-    def log_controller_events(events: tuple[str, ...]) -> None:
-        """Пишет решения state machine в общий журнал."""
+    def log_controller_events(events: tuple[str, ...], now: float) -> None:
+        """Пишет решения автомата, ограничивая только повторяющийся шум."""
+        nonlocal last_repetitive_event_log
         for event in events:
+            # Повторяющиеся строки на каждый кадр не должны задерживать UART.
+            # Переходы, DISARM, FAULT и ошибки всегда записываются сразу.
+            repetitive = event.startswith(("RC SUPPRESS", "RC TIMEOUT"))
+            if repetitive and now - last_repetitive_event_log < 0.5:
+                continue
             color = Color.RED if "DISARM" in event else Color.YELLOW if "TAKEOVER" in event else Color.WHITE
             journal.write("DECISION", event, color)
+            if repetitive:
+                last_repetitive_event_log = now
 
     journal.write("START", f"UART={serial_port} baud={baudrate}; управляемый мост активен", Color.CYAN)
     journal.write(
@@ -235,7 +249,7 @@ def main() -> int:
                         )
 
                     result = takeover.process(frame, channels, now)
-                    log_controller_events(result.events)
+                    log_controller_events(result.events, now)
                     if result.link_lost != last_link_lost:
                         journal.write(
                             "INPUT",
@@ -280,13 +294,17 @@ def main() -> int:
                             color = Color.RED if category == "SAFETY" else Color.YELLOW
                             journal.write(category, event, color)
                         output_frame = landing_result.output_frame
-                        if landing_result.state.value != "LIVE":
+                        if landing_result.state.value != "LIVE" and (
+                            landing_result.events
+                            or now - last_command_log >= 0.25
+                        ):
                             journal.write(
                                 "COMMAND",
                                 f"FC RC roll={landing_result.roll_command} pitch={landing_result.pitch_command} "
                                 f"throttle={landing_result.throttle_command} state={landing_result.state.value}",
                                 Color.RED,
                             )
+                            last_command_log = now
                         if landing_result.disarm_requested:
                             journal.write("COMMAND", "FC RC CH5 DISARM; MOTORS OFF", Color.RED)
                     bridge_uart.write_frame(output_frame)

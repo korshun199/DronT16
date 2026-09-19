@@ -32,6 +32,8 @@ START_RECEIVER_BRIDGE="1"
 START_FILESAFE_SIMULATOR="0"
 # Конфигурация и журнал симулятора находятся рядом с проектом.
 SIMULATOR_SCRIPT="scripts/simulator_filesafe.py"
+# Рабочий журнал моста: очищается перед новым запуском DronT16.
+RUNTIME_LOG="simulator_filesafe.log"
 
 log() {
     # Печатает понятное сообщение текущего шага запуска.
@@ -64,6 +66,14 @@ main() {
     if pgrep -af "${PROJECT_DIR}/.venv/bin/python3 -m src.app" >/dev/null 2>&1; then
         log "DronT16 уже запущен; второй экземпляр камеры не запускаю"
         return 0
+    fi
+    # Не очищаем журнал, если старый CRSF-мост ещё работает и может дописывать его.
+    if pgrep -af "${PROJECT_DIR}/scripts/crsf_bridge.py" >/dev/null 2>&1; then
+        log "Старый CRSF-мост уже запущен; журнал не очищаю"
+    else
+        # Новый запуск всегда начинает рабочий журнал с чистого файла.
+        : > "${PROJECT_DIR}/${RUNTIME_LOG}"
+        log "Рабочий журнал очищен: ${RUNTIME_LOG}"
     fi
     local output_mode="${DISPLAY_MODE}"
     # На Raspberry Pi рабочим выходом проекта является J7, даже если

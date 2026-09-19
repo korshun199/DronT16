@@ -54,6 +54,10 @@ class LandingConfig:
     level_roll_tolerance_deg: float = 5.0
     level_pitch_tolerance_deg: float = 5.0
     level_hold_s: float = 1.0
+    level_throttle: int = 992
+    altitude_hold_gain: float = 80.0
+    max_altitude_correction: int = 120
+    landing_throttle_barrier: int = 600
 
 
 @dataclass(frozen=True)
@@ -86,6 +90,8 @@ class LandingController:
         self.was_armed = False
         self.level_stable_since: float | None = None
         self.level_was_ok: bool | None = None
+        self.hold_altitude_m: float | None = None
+        self.throttle_barrier_triggered = False
 
     def process(
         self,
@@ -108,6 +114,8 @@ class LandingController:
             self.was_armed = False
             self.level_stable_since = None
             self.level_was_ok = None
+            self.hold_altitude_m = None
+            self.throttle_barrier_triggered = False
         elif sensor is not None and sensor.is_fresh(now, cfg.sensor_max_age_s) and self.altitude_zero_m is None:
             self.altitude_zero_m = sensor.altitude_m
             self.was_armed = True
@@ -125,6 +133,8 @@ class LandingController:
             self.initial_throttle = None
             self.fault_frame = None
             self.level_stable_since = None
+            self.hold_altitude_m = None
+            self.throttle_barrier_triggered = False
             return self._result(frame, output_channels, events, self.state)
 
         if self.state is LandingState.LIVE:
@@ -161,6 +171,13 @@ class LandingController:
             self.fault_frame = None
             events.append("FAULT -> LEVELING: MSP данные восстановлены")
 
+        # При потере связи фиксируем высоту, на которой был пилотский контроль.
+        # До начала снижения Raspberry удерживает эту высоту, а не последний
+        # случайный газ из RC-кадра.
+        if self.hold_altitude_m is None and current_sensor.altitude_m is not None:
+            self.hold_altitude_m = current_sensor.altitude_m
+            events.append(f"ALTITUDE_HOLD={self.hold_altitude_m:.2f}m")
+
         roll = self._correction(current_sensor.roll_deg, cfg.target_roll_deg)
         pitch = self._correction(current_sensor.pitch_deg, cfg.target_pitch_deg)
         output_channels[cfg.roll_channel] = roll
@@ -192,8 +209,17 @@ class LandingController:
             self.state = LandingState.DESCENT
             events.append("LEVELING -> DESCENT")
 
+        if self.state is LandingState.LEVELING:
+            output_channels[cfg.throttle_channel] = self._hold_throttle(current_sensor)
         if self.state in (LandingState.DESCENT, LandingState.LANDED):
             output_channels[cfg.throttle_channel] = self._throttle_command(output_channels[cfg.throttle_channel], elapsed)
+            if self.throttle_barrier_triggered and self.state is LandingState.DESCENT:
+                self.state = LandingState.LANDED
+                output_channels[cfg.throttle_channel] = cfg.throttle_min
+                events.append(
+                    f"DESCENT -> LANDED: throttle barrier {cfg.landing_throttle_barrier}; "
+                    "газ переведен в минимум"
+                )
         if self.state is LandingState.DESCENT and self._is_landed(current_sensor, now):
             self.state = LandingState.LANDED
             output_channels[cfg.throttle_channel] = cfg.throttle_min
@@ -217,8 +243,22 @@ class LandingController:
         step = max(0.0, self.config.throttle_step_per_s) * max(0.0, elapsed)
         initial = self.initial_throttle if self.initial_throttle is not None else current
         command = round(max(target, initial - step))
+        # Резко завершаем снижение при пересечении настроенного барьера сверху.
+        barrier = self.config.landing_throttle_barrier
+        if self.last_throttle is not None and self.last_throttle > barrier >= command:
+            command = target
+            self.throttle_barrier_triggered = True
         self.last_throttle = command
         return command
+
+    def _hold_throttle(self, sensor: SensorSample) -> int:
+        """Поддерживает высоту около точки потери связи ограниченной поправкой."""
+        command = self.config.level_throttle
+        if self.hold_altitude_m is not None and sensor.altitude_m is not None:
+            correction = round((self.hold_altitude_m - sensor.altitude_m) * self.config.altitude_hold_gain)
+            correction = max(-self.config.max_altitude_correction, min(self.config.max_altitude_correction, correction))
+            command += correction
+        return max(self.config.rc_min, min(self.config.rc_max, command))
 
     def _is_landed(self, sensor: SensorSample, now: float) -> bool:
         """Определяет тестовое касание по барометрической высоте и вариометру."""
