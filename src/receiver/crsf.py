@@ -13,6 +13,8 @@ from dataclasses import dataclass
 
 # Тип CRSF-пакета с 16 каналами по 11 бит.
 CRSF_RC_CHANNELS_PACKED = 0x16
+# Служебный кадр CRSF с RSSI, LQ и SNR радиолинии.
+CRSF_LINK_STATISTICS = 0x14
 # Максимальный размер кадра CRSF по спецификации.
 CRSF_MAX_FRAME_LENGTH = 64
 

@@ -1,11 +1,15 @@
 # Настройки первого моста Raspberry между CRSF-приёмником и Betaflight.
 [bridge]
 # UART Raspberry Pi 5: pin 10 RXD0 принимает, pin 8 TXD0 передаёт.
+# Проверенный UART CRSF GPIO14/15; receiver_link_test получает здесь кадры.
 serial_port = "/dev/ttyAMA0"
 # Скорость CRSF приёмника и UART1 полётного контроллера.
 baudrate = 420000
 # Передавать только проверенные кадры каналов RC.
 forward_frame_type = 22
+# Передавать в LIVE также CRSF LINK_STATISTICS (RSSI/LQ/SNR) к полётнику.
+# Без этого стики работают, но штатные RSSI/LQ в Betaflight OSD пропадают.
+forward_link_statistics = true
 # Остановить передачу после такого таймаута без корректного RC-кадра.
 link_timeout_ms = 300
 # Период диагностической строки моста.
@@ -20,6 +24,11 @@ control_file = "/tmp/dront16_command"
 simulator_control_file = "/tmp/simulator_filesafe_command"
 # Общий append-only журнал моста и симулятора.
 log_file = "simulator_filesafe.log"
+# Период полного снимка всех 16 каналов пульта в журнале.
+pilot_log_period_ms = 500
+# Период полного снимка RC-команды Raspberry, переданной полётнику.
+command_log_period_ms = 100
+
 [msp]
 # Канал чтения датчиков Betaflight; включён для текущей проверки MSP.
 enabled = true
@@ -106,3 +115,11 @@ turn_timeout_s = 3.0
 turn_heading_tolerance_deg = 8.0
 # Канал yaw: CH4.
 yaw_channel = 4
+# Максимальная скорость перехода от газа пилота к газу висения.
+takeover_throttle_step_per_s = 50.0
+# Превышение высоты, после которого включается защита от набора.
+climb_guard_altitude_error_m = 0.20
+# Скорость набора, после которой включается защита от набора.
+climb_guard_vario_m_s = 0.50
+# Жёсткий верхний предел газа при активной защите от набора.
+climb_guard_max_throttle = 850

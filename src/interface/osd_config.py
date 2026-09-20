@@ -50,6 +50,7 @@ class OsdConfig:
     # Цвета режимов в формате BGR OpenCV.
     mode_colors: Mapping[Mode, tuple[int, int, int]] | None = None
     # Режим заполнения и ручная геометрия полного изображения на J7.
+    video_standard: str = "NTSC"
     output_fit: str = "stretch"
     output_scale_x: float = 1.0
     output_scale_y: float = 1.0
@@ -90,6 +91,7 @@ def load_osd_config(path: str | Path) -> OsdConfig:
             capture_box_offset_x=int(raw.get("capture_box_offset_x", 0)),
             capture_box_offset_y=int(raw.get("capture_box_offset_y", 0)),
             mode_colors=mode_colors,
+            video_standard=str(output.get("video_standard", "NTSC")).upper(),
             output_fit=str(output.get("fit", "stretch")),
             output_scale_x=float(output.get("scale_x", 1.0)),
             output_scale_y=float(output.get("scale_y", 1.0)),
@@ -113,6 +115,8 @@ def load_osd_config(path: str | Path) -> OsdConfig:
             raise ValueError("Каждый цвет OSD должен содержать три значения от 0 до 255")
     if result.output_fit not in {"stretch"}:
         raise ValueError("output_fit должен быть stretch")
+    if result.video_standard not in {"NTSC", "PAL"}:
+        raise ValueError("video_standard должен быть NTSC или PAL")
     if result.output_scale_x <= 0 or result.output_scale_y <= 0:
         raise ValueError("Масштаб полного изображения должен быть положительным")
     return result

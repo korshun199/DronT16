@@ -26,6 +26,12 @@ DRM_IOCTL_MODE_DESTROY_DUMB = _ioc(DRM_IOWR, 0xB4, 8)
 DRM_FORMAT_XRGB8888 = 0x34325258
 DRM_CLIENT_CAP_UNIVERSAL_PLANES = 2
 
+# Имена точных межстрочных режимов Composite J7 для стандартов проекта.
+VIDEO_STANDARD_MODE_NAMES = {
+    "NTSC": "720x480i",
+    "PAL": "720x576i",
+}
+
 
 class _CreateDumb(ctypes.Structure):
     _fields_ = [("height", ctypes.c_uint32), ("width", ctypes.c_uint32), ("bpp", ctypes.c_uint32),
@@ -98,7 +104,8 @@ class J7Output:
 
     def __init__(self, device: str = "/dev/dri/card1", fit: str = "stretch",
                  scale_x: float = 1.0, scale_y: float = 1.0,
-                 offset_x: int = 0, offset_y: int = 0) -> None:
+                 offset_x: int = 0, offset_y: int = 0,
+                 video_standard: str = "NTSC") -> None:
         import cv2
 
         self._cv2 = cv2
@@ -108,6 +115,10 @@ class J7Output:
         self.scale_y = scale_y
         self.offset_x = offset_x
         self.offset_y = offset_y
+        # Стандарт должен совпадать с аналоговым источником EasyCap.
+        self.video_standard = video_standard.upper()
+        if self.video_standard not in VIDEO_STANDARD_MODE_NAMES:
+            raise ValueError("Видеостандарт J7 должен быть NTSC или PAL")
         self._fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
         self._lib = ctypes.CDLL("libdrm.so.2")
         self._lib.drmSetMaster.argtypes = [ctypes.c_int]
@@ -148,7 +159,7 @@ class J7Output:
                 raise RuntimeError("Подключённый DRM-коннектор не найден")
             self.connector_id = connector.contents.connector_id
             self.crtc_id = self._find_crtc(resources.contents, connector.contents.encoder_id)
-            self.mode = connector.contents.modes[0]
+            self.mode = self._select_video_mode(connector.contents)
             self.width = self.mode.hdisplay
             self.height = self.mode.vdisplay
             self._create_buffer()
@@ -157,6 +168,28 @@ class J7Output:
             if connector:
                 lib.drmModeFreeConnector(connector)
             lib.drmModeFreeResources(resources)
+
+    def _select_video_mode(self, connector: _Connector) -> _Mode:
+        """Выбирает точный режим NTSC/PAL вместо первого режима DRM-списка."""
+        required_name = VIDEO_STANDARD_MODE_NAMES[self.video_standard]
+        modes = [connector.modes[index] for index in range(connector.count_modes)]
+        for mode in modes:
+            name = bytes(mode.name).split(b"\0", 1)[0].decode("ascii", errors="replace")
+            if name == required_name:
+                return mode
+        available = ", ".join(
+            bytes(mode.name).split(b"\0", 1)[0].decode("ascii", errors="replace")
+            for mode in modes
+        )
+        raise RuntimeError(
+            f"J7 не предоставляет режим {required_name} для {self.video_standard}; "
+            f"доступны: {available}"
+        )
+
+    @property
+    def mode_name(self) -> str:
+        """Возвращает имя фактически выбранного DRM-режима J7."""
+        return bytes(self.mode.name).split(b"\0", 1)[0].decode("ascii", errors="replace")
 
     def _find_crtc(self, resources: _Resources, encoder_id: int) -> int:
         """Находит CRTC, совместимый с выбранным encoder."""
@@ -242,11 +275,16 @@ class J7Output:
         cv2 = self._cv2
         import numpy as np
         height, width = frame.shape[:2]
-        # Режим stretch сначала заполняет весь кадр J7 без чёрных полей.
-        target = cv2.resize(frame, (self.width, self.height), cv2.INTER_AREA)
+        # При совпадающих размерах не ресемплируем кадр: тонкие символы
+        # штатного OSD MAX7456 остаются в исходных пикселях EasyCap.
+        if width == self.width and height == self.height:
+            target = frame
+        else:
+            target = cv2.resize(frame, (self.width, self.height), cv2.INTER_AREA)
         scaled_width = max(1, round(self.width * self.scale_x))
         scaled_height = max(1, round(self.height * self.scale_y))
-        target = cv2.resize(target, (scaled_width, scaled_height), cv2.INTER_AREA)
+        if target.shape[1] != scaled_width or target.shape[0] != scaled_height:
+            target = cv2.resize(target, (scaled_width, scaled_height), cv2.INTER_AREA)
         # Размещаем масштабированное изображение по центру с ручным смещением.
         canvas = np.zeros((self.height, self.width, 3), dtype=target.dtype)
         left = (self.width - scaled_width) // 2 + self.offset_x

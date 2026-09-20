@@ -216,6 +216,39 @@ class MspLandingTests(unittest.TestCase):
         self.assertGreater(lower_result.throttle_command, 992)
         self.assertLess(higher_result.throttle_command, lower_result.throttle_command)
 
+    def test_takeover_does_not_jump_from_pilot_throttle_to_hover_throttle(self) -> None:
+        """При CH7 первый кадр не повышает газ ступенькой до level_throttle."""
+        config = LandingConfig(
+            0, 1, 2, 992, 191, 1792, 0.0, 0.0, 10.0, 100,
+            10.0, 20.0, 191, 0.25, 0.30, 0.15, 1.5, "HOLD", 4, 191,
+            None, 1500, level_throttle=992, takeover_throttle_step_per_s=50.0,
+        )
+        controller = LandingController(config)
+        channels = [992] * 16
+        channels[2] = 720
+        current = frame(tuple(channels))
+        sample = SensorSample(10.0, 0.0, 0.0, 0.0, 0.0, 0.0, True, True, 0.0, 0.0)
+        result = controller.process(current, tuple(channels), "TAKEOVER", sample, 0.0, armed=True)
+        self.assertEqual(result.throttle_command, 720)
+
+    def test_climb_guard_limits_throttle(self) -> None:
+        """При наборе высоты газ ограничивается отдельным защитным барьером."""
+        config = LandingConfig(
+            0, 1, 2, 992, 191, 1792, 0.0, 0.0, 10.0, 100,
+            10.0, 20.0, 191, 0.25, 0.30, 0.15, 1.5, "HOLD", 4, 191,
+            None, 1500, level_throttle=992, climb_guard_max_throttle=850,
+        )
+        controller = LandingController(config)
+        channels = [992] * 16
+        channels[2] = 992
+        current = frame(tuple(channels))
+        baseline = SensorSample(10.0, 0.0, 0.0, 0.0, 0.0, 0.0, True, True, 0.0, 0.0)
+        controller.process(current, tuple(channels), "LIVE", baseline, 0.0, armed=True)
+        rising = SensorSample(10.5, 1.0, 0.0, 0.0, 0.0, 0.1, True, True, 0.1, 0.1)
+        result = controller.process(current, tuple(channels), "TAKEOVER", rising, 0.1, armed=True)
+        self.assertEqual(result.throttle_command, 850)
+        self.assertTrue(any("CLIMB GUARD" in event for event in result.events))
+
 
 if __name__ == "__main__":
     unittest.main()

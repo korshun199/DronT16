@@ -80,6 +80,14 @@ class LandingConfig:
     turn_heading_tolerance_deg: float = 8.0
     # Номер yaw-канала CRSF в нулевой индексации; CH4 = 3.
     yaw_channel: int = 3
+    # Максимальная скорость перехода от газа пилота к газу висения.
+    takeover_throttle_step_per_s: float = 50.0
+    # Превышение высоты, после которого включается защита от набора.
+    climb_guard_altitude_error_m: float = 0.20
+    # Скорость набора, после которой включается защита от набора.
+    climb_guard_vario_m_s: float = 0.50
+    # Жёстний верхний предел газа при активной защите от набора.
+    climb_guard_max_throttle: int = 850
 
 
 @dataclass(frozen=True)
@@ -122,6 +130,9 @@ class LandingController:
         self.turn_failed = False
         self.turn_completed = False
         self.turn_started_at: float | None = None
+        self.takeover_entry_throttle: int | None = None
+        self.last_takeover_throttle_time: float | None = None
+        self.climb_guard_active = False
 
     def process(
         self,
@@ -153,6 +164,9 @@ class LandingController:
             self.turn_failed = False
             self.turn_completed = False
             self.turn_started_at = None
+            self.takeover_entry_throttle = None
+            self.last_takeover_throttle_time = None
+            self.climb_guard_active = False
         elif sensor is not None and sensor.is_fresh(now, cfg.sensor_max_age_s) and self.altitude_zero_m is None:
             self.altitude_zero_m = sensor.altitude_m
             self.was_armed = True
@@ -179,11 +193,19 @@ class LandingController:
             self.turn_failed = False
             self.turn_completed = False
             self.turn_started_at = None
+            self.takeover_entry_throttle = None
+            self.last_takeover_throttle_time = None
+            self.climb_guard_active = False
             return self._result(frame, output_channels, events, self.state)
 
         if self.state is LandingState.LIVE:
             self.state = LandingState.TAKEOVER
             self.takeover_started_at = now
+            # Запоминаем реальный газ из последнего кадра пилота. Переход к
+            # заданному газу висения будет ограничен по скорости и не вызовет
+            # резкого набора высоты при включении CH7.
+            self.takeover_entry_throttle = output_channels[cfg.throttle_channel]
+            self.last_takeover_throttle_time = now
             events.append("TAKEOVER -> LEVELING")
 
         if sensor is not None:
@@ -271,7 +293,7 @@ class LandingController:
                 )
 
         if self.state is LandingState.TURNING:
-            output_channels[cfg.throttle_channel] = self._hold_throttle(current_sensor, now)
+            self._set_hold_throttle(output_channels, current_sensor, now, events)
             return self._result(rebuild_rc_frame(frame, output_channels), output_channels, events, self.state)
 
         level_ok = self._is_level(current_sensor)
@@ -309,14 +331,14 @@ class LandingController:
                     self.turn_started_at = now
                     events.append(f"LEVELING -> TURNING: yaw +{cfg.turn_degrees:.0f}deg")
                     output_channels[cfg.yaw_channel] = cfg.turn_yaw_command
-                    output_channels[cfg.throttle_channel] = self._hold_throttle(current_sensor, now)
+                    self._set_hold_throttle(output_channels, current_sensor, now, events)
                     return self._result(rebuild_rc_frame(frame, output_channels), output_channels, events, self.state)
             else:
                 self.state = LandingState.DESCENT
                 events.append("LEVELING -> DESCENT")
 
         if self.state is LandingState.LEVELING:
-            output_channels[cfg.throttle_channel] = self._hold_throttle(current_sensor, now)
+            self._set_hold_throttle(output_channels, current_sensor, now, events)
         if self.state in (LandingState.DESCENT, LandingState.LANDED):
             output_channels[cfg.throttle_channel] = self._throttle_command(output_channels[cfg.throttle_channel], elapsed)
             if self.throttle_barrier_triggered and self.state is LandingState.DESCENT:
@@ -360,7 +382,20 @@ class LandingController:
     def _hold_throttle(self, sensor: SensorSample, now: float) -> int:
         """Непрерывно удерживает высоту по ошибке, интегратору и вариометру."""
         cfg = self.config
-        command = float(cfg.level_throttle)
+        # Вход в takeover не должен менять газ ступенькой: это могло вызвать
+        # набор высоты, если пилот в момент CH7 держал газ ниже висения.
+        entry = self.takeover_entry_throttle
+        if entry is None:
+            entry = cfg.level_throttle
+        previous_time = self.last_takeover_throttle_time
+        dt_takeover = 0.0 if previous_time is None else max(0.0, min(0.25, now - previous_time))
+        self.last_takeover_throttle_time = now
+        step = max(0.0, cfg.takeover_throttle_step_per_s) * dt_takeover
+        if entry < cfg.level_throttle:
+            command = min(float(cfg.level_throttle), float(entry) + step)
+        else:
+            command = max(float(cfg.level_throttle), float(entry) - step)
+        self.climb_guard_active = False
         if self.hold_altitude_m is not None and sensor.altitude_m is not None:
             # Положительная ошибка означает, что аппарат ниже заданной высоты.
             altitude_error = self.hold_altitude_m - sensor.altitude_m
@@ -380,7 +415,32 @@ class LandingController:
             correction = round(proportional + integral + vario)
             correction = max(-cfg.max_altitude_correction, min(cfg.max_altitude_correction, correction))
             command += correction
+            # Отдельная защита от набора: при положительном варио или
+            # превышении высоты команда не может оставаться на газе висения.
+            # Это ограничитель, а не мгновенный DISARM.
+            climb_guard = (
+                sensor.altitude_m - self.hold_altitude_m >= cfg.climb_guard_altitude_error_m
+                or (sensor.vario_m_s or 0.0) >= cfg.climb_guard_vario_m_s
+            )
+            if climb_guard:
+                command = min(command, float(cfg.climb_guard_max_throttle))
+                self.climb_guard_active = True
         return max(cfg.rc_min, min(cfg.rc_max, round(command)))
+
+    def _set_hold_throttle(
+        self,
+        output_channels: list[int],
+        sensor: SensorSample,
+        now: float,
+        events: list[str],
+    ) -> None:
+        """Записывает газ удержания и однократно сообщает о защите от набора."""
+        was_active = self.climb_guard_active
+        output_channels[self.config.throttle_channel] = self._hold_throttle(sensor, now)
+        if self.climb_guard_active and not was_active:
+            events.append(
+                "CLIMB GUARD: gas limited; altitude/vario above takeover target"
+            )
 
     def _update_turn_progress(self, yaw_deg: float | None) -> None:
         """Накопительно считает yaw с учётом перехода через 0/360 градусов."""
