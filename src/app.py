@@ -104,8 +104,20 @@ def main() -> int:
         j7_output = J7Output(
             args.j7_device, osd_config.output_fit, osd_config.output_scale_x,
             osd_config.output_scale_y, osd_config.output_offset_x,
-            osd_config.output_offset_y,
+            osd_config.output_offset_y, osd_config.video_standard,
         )
+        print(
+            f"[DronT16] Видеотракт: EasyCap={source.describe()} | "
+            f"J7={j7_output.mode_name} ({osd_config.video_standard})",
+            flush=True,
+        )
+        if source.capture.get(cv2.CAP_PROP_FRAME_WIDTH) != j7_output.width or \
+                source.capture.get(cv2.CAP_PROP_FRAME_HEIGHT) != j7_output.height:
+            print(
+                "[DronT16] ПРЕДУПРЕЖДЕНИЕ: размеры EasyCap и J7 различаются; "
+                "штатное OSD может исказиться.",
+                file=sys.stderr, flush=True,
+            )
     if args.display in ("hdmi", "both"):
         cv2.namedWindow("DronT16", cv2.WINDOW_NORMAL)
         cv2.moveWindow("DronT16", args.hdmi_x, args.hdmi_y)

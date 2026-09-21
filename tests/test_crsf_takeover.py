@@ -6,6 +6,7 @@ from src.receiver.crsf import (
     CRSF_RC_CHANNELS_PACKED,
     crc8_dvb_s2,
     extract_raw_frames,
+    parse_link_statistics,
     pack_channels,
     unpack_channels,
 )
@@ -102,6 +103,16 @@ class TakeoverTests(unittest.TestCase):
         result = controller.process(takeover, unpack_channels(takeover[3:-1]), 5.0)
         self.assertEqual(unpack_channels(result.output_frame[3:-1])[2], 1500)
         self.assertEqual(result.output_kind, "TAKEOVER_HOLD")
+
+    def test_link_statistics_field_order(self) -> None:
+        """LQ и SNR читаются из третьего и четвёртого байтов, а не из RSSI2."""
+        stats = parse_link_statistics(bytes((44, 33, 98, 7, 1, 2, 50, 41, 97, 250)))
+        self.assertEqual(stats.uplink_rssi_1, 44)
+        self.assertEqual(stats.uplink_rssi_2, 33)
+        self.assertEqual(stats.uplink_link_quality, 98)
+        self.assertEqual(stats.uplink_snr, 7)
+        self.assertEqual(stats.downlink_link_quality, 97)
+        self.assertEqual(stats.downlink_snr, -6)
 
 
 if __name__ == "__main__":

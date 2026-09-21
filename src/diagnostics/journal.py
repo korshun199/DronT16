@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from pathlib import Path
 
 
@@ -42,7 +43,10 @@ class EventJournal:
         minutes = int(elapsed // 60)
         seconds = elapsed % 60
         self.sequence += 1
-        stamp = f"[{minutes:02d}:{seconds:06.3f}] [{self.source}] [{self.sequence:06d}] [{category}]"
+        # Фиксируем местные реальные часы и отдельное время от старта журнала.
+        wall_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        elapsed_time = f"{minutes:02d}:{seconds:06.3f}"
+        stamp = f"[{wall_time}] [{elapsed_time}] [{self.source}] [{self.sequence:06d}] [{category}]"
         plain = f"{stamp} {message}"
         if console:
             print(f"{color}{plain}{Color.RESET}", flush=True)

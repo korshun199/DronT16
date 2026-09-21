@@ -18,6 +18,7 @@ from dataclasses import dataclass
 # Команды MSP v1, поддерживаемые Betaflight для первичного чтения датчиков.
 MSP_ATTITUDE = 108
 MSP_ALTITUDE = 109
+MSP_RAW_IMU = 102
 
 
 def msp_checksum(size: int, command: int, payload: bytes = b"") -> int:
@@ -49,6 +50,11 @@ class SensorSample:
     attitude_valid: bool
     altitude_received_at: float | None = None
     attitude_received_at: float | None = None
+    # Сырые оси магнитометра из MSP_RAW_IMU для диагностики вращения.
+    mag_x: int | None = None
+    mag_y: int | None = None
+    mag_z: int | None = None
+    mag_received_at: float | None = None
 
     @property
     def complete(self) -> bool:
@@ -80,6 +86,10 @@ class MspParser:
         self.yaw_deg: float | None = None
         self.last_altitude_at: float | None = None
         self.last_attitude_at: float | None = None
+        self.mag_x: int | None = None
+        self.mag_y: int | None = None
+        self.mag_z: int | None = None
+        self.last_mag_at: float | None = None
 
     def feed(self, data: bytes, received_at: float | None = None) -> list[SensorSample]:
         """Принимает байты и возвращает обновлённые согласованные образцы."""
@@ -124,6 +134,10 @@ class MspParser:
             self.altitude_m = altitude_cm / 100.0
             self.vario_m_s = vario_cm_s / 100.0
             self.last_altitude_at = now
+        elif command == MSP_RAW_IMU and len(payload) >= 18:
+            # MSP_RAW_IMU: ACC X/Y/Z, GYRO X/Y/Z, MAG X/Y/Z, по int16.
+            _, _, _, _, _, _, self.mag_x, self.mag_y, self.mag_z = struct.unpack_from("<hhhhhhhhh", payload)
+            self.last_mag_at = now
         else:
             return None
         return SensorSample(
@@ -137,6 +151,10 @@ class MspParser:
             attitude_valid=self.roll_deg is not None and self.last_attitude_at is not None,
             altitude_received_at=self.last_altitude_at,
             attitude_received_at=self.last_attitude_at,
+            mag_x=self.mag_x,
+            mag_y=self.mag_y,
+            mag_z=self.mag_z,
+            mag_received_at=self.last_mag_at,
         )
 
 
@@ -179,6 +197,7 @@ class BetaflightMspLink:
         if current_time >= self._next_request_at:
             os.write(self._fd, build_msp_request(MSP_ATTITUDE))
             os.write(self._fd, build_msp_request(MSP_ALTITUDE))
+            os.write(self._fd, build_msp_request(MSP_RAW_IMU))
             self._next_request_at = current_time + self.request_period_s
         ready, _, _ = select.select([self._fd], [], [], 0)
         if not ready:
