@@ -52,7 +52,9 @@ def config(**overrides: object) -> FailsafeConfig:
         "stabilization_channel": None,
         "stabilization_value": 1500,
         "level_hold_s": 1.0,
-        "level_throttle": 992,
+        "altitude_hold_stable_s": 1.0,
+        "altitude_hold_tolerance_m": 0.15,
+        "altitude_hold_vario_tolerance_m_s": 0.30,
         "turn_yaw_command": 1155,
     }
     values.update(overrides)
@@ -84,7 +86,15 @@ class FailsafeTests(unittest.TestCase):
         leveling = controller.process(current, channels, "TAKEOVER", sensor(received_at=0.0), 0.0)
         self.assertEqual(leveling.state, FailsafeState.LEVELING)
 
-        turning = controller.process(current, channels, "TAKEOVER", sensor(received_at=1.1), 1.1)
+        altitude_hold = controller.process(current, channels, "TAKEOVER", sensor(received_at=1.1), 1.1)
+        self.assertEqual(altitude_hold.state, FailsafeState.ALTITUDE_HOLD)
+        self.assertEqual(altitude_hold.yaw_command, 992)
+        self.assertEqual(altitude_hold.throttle_command, 992)
+
+        waiting = controller.process(current, channels, "TAKEOVER", sensor(received_at=1.5), 1.5)
+        self.assertEqual(waiting.state, FailsafeState.ALTITUDE_HOLD)
+
+        turning = controller.process(current, channels, "TAKEOVER", sensor(received_at=2.2), 2.2)
         self.assertEqual(turning.state, FailsafeState.TURNING)
         self.assertEqual(turning.yaw_command, 1155)
 
@@ -112,6 +122,64 @@ class FailsafeTests(unittest.TestCase):
         higher = controller.process(lower.output_frame, channels, "TAKEOVER", sensor(altitude=10.5, received_at=0.2), 0.2)
         self.assertGreater(lower.throttle_command, 992)
         self.assertLess(higher.throttle_command, lower.throttle_command)
+
+    def test_turn_waits_for_stable_altitude(self) -> None:
+        """Разворот не начинается, пока высота не удерживается в допуске."""
+        controller = FailsafeController(config())
+        channels = tuple([992] * 16)
+        current = frame(channels)
+
+        controller.process(current, channels, "LIVE", sensor(altitude=10.0), 0.0)
+        altitude_hold = controller.process(
+            current, channels, "TAKEOVER", sensor(altitude=10.0, received_at=0.0), 0.0
+        )
+        self.assertEqual(altitude_hold.state, FailsafeState.LEVELING)
+
+        altitude_hold = controller.process(
+            altitude_hold.output_frame,
+            channels,
+            "TAKEOVER",
+            sensor(altitude=10.0, received_at=1.1),
+            1.1,
+        )
+        self.assertEqual(altitude_hold.state, FailsafeState.ALTITUDE_HOLD)
+        self.assertEqual(altitude_hold.yaw_command, 992)
+
+        unstable = controller.process(
+            altitude_hold.output_frame,
+            channels,
+            "TAKEOVER",
+            sensor(altitude=9.5, received_at=1.2),
+            1.2,
+        )
+        self.assertEqual(unstable.state, FailsafeState.ALTITUDE_HOLD)
+
+        stable_start = controller.process(
+            unstable.output_frame,
+            channels,
+            "TAKEOVER",
+            sensor(altitude=10.0, received_at=1.3),
+            1.3,
+        )
+        self.assertEqual(stable_start.state, FailsafeState.ALTITUDE_HOLD)
+
+        still_waiting = controller.process(
+            stable_start.output_frame,
+            channels,
+            "TAKEOVER",
+            sensor(altitude=10.0, received_at=1.9),
+            1.9,
+        )
+        self.assertEqual(still_waiting.state, FailsafeState.ALTITUDE_HOLD)
+
+        turning = controller.process(
+            still_waiting.output_frame,
+            channels,
+            "TAKEOVER",
+            sensor(altitude=10.0, received_at=2.4),
+            2.4,
+        )
+        self.assertEqual(turning.state, FailsafeState.TURNING)
 
     def test_altitude_zero_is_latched_until_disarm(self) -> None:
         """Нулевая высота фиксируется при ARM и не пересчитывается в LIVE/TAKEOVER."""

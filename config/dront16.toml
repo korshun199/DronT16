@@ -148,7 +148,13 @@ stabilization_value = 1500
 level_roll_tolerance_deg = 5.0
 level_pitch_tolerance_deg = 5.0
 level_hold_s = 1.0
-level_throttle = 992
+# Минимальное время устойчивой высоты перед началом разворота.
+altitude_hold_stable_s = 1.0
+# Допуск высоты и вертикальной скорости для подтверждения удержания.
+# Газ не задаётся числом: каждый RC-кадр рассчитывается по цели удержания.
+altitude_hold_tolerance_m = 0.15
+altitude_hold_vario_tolerance_m_s = 0.30
+# Фиксированный газ здесь не задаётся: старт берётся из последнего газа пилота.
 altitude_hold_gain = 80.0
 altitude_hold_integral_gain = 12.0
 altitude_hold_vario_gain = 35.0
@@ -157,10 +163,8 @@ max_altitude_integral_correction = 80
 turn_enabled = true
 turn_degrees = 180.0
 turn_yaw_command = 1155
-takeover_throttle_step_per_s = 50.0
 climb_guard_altitude_error_m = 0.20
 climb_guard_vario_m_s = 0.50
-climb_guard_max_throttle = 850
 
 [simulation]
 # Старый автономный симулятор запускается только отдельным явным тестом.

@@ -18,6 +18,7 @@ class FailsafeState(str, Enum):
 
     LIVE = "LIVE"
     LEVELING = "LEVELING"
+    ALTITUDE_HOLD = "ALTITUDE_HOLD"
     TURNING = "TURNING"
     HOLDING = "HOLDING"
     FAULT = "FAULT"
@@ -47,7 +48,9 @@ class FailsafeConfig:
     level_roll_tolerance_deg: float = 5.0
     level_pitch_tolerance_deg: float = 5.0
     level_hold_s: float = 1.0
-    level_throttle: int = 992
+    altitude_hold_stable_s: float = 1.0
+    altitude_hold_tolerance_m: float = 0.15
+    altitude_hold_vario_tolerance_m_s: float = 0.30
     altitude_hold_gain: float = 80.0
     altitude_hold_integral_gain: float = 12.0
     altitude_hold_vario_gain: float = 35.0
@@ -56,10 +59,8 @@ class FailsafeConfig:
     turn_enabled: bool = True
     turn_degrees: float = 180.0
     turn_yaw_command: int = 1155
-    takeover_throttle_step_per_s: float = 50.0
     climb_guard_altitude_error_m: float = 0.20
     climb_guard_vario_m_s: float = 0.50
-    climb_guard_max_throttle: int = 850
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,8 @@ class FailsafeController:
         self.last_takeover_throttle_time: float | None = None
         self.level_stable_since: float | None = None
         self.level_was_ok: bool | None = None
+        self.altitude_stable_since: float | None = None
+        self.altitude_was_ok: bool | None = None
         self.turn_started_at: float | None = None
         self.turn_last_yaw_deg: float | None = None
         self.turn_progress_deg = 0.0
@@ -137,6 +140,8 @@ class FailsafeController:
 
         if self.state is FailsafeState.LIVE:
             self.state = FailsafeState.LEVELING
+            # Стартуем с фактического газа пилота. Дальше газ рассчитывается
+            # только регулятором высоты и не заменяется фиксированным числом.
             self.takeover_entry_throttle = output_channels[cfg.throttle_channel]
             self.last_takeover_throttle_time = now
             events.append("LINK_LOST -> LEVELING")
@@ -199,6 +204,30 @@ class FailsafeController:
                 self.level_stable_since = None
             stable = self.level_stable_since is not None and now - self.level_stable_since >= cfg.level_hold_s
             if stable:
+                self.state = FailsafeState.ALTITUDE_HOLD
+                self.altitude_stable_since = None
+                self.altitude_was_ok = None
+                events.append("LEVELING -> ALTITUDE_HOLD: горизонт стабилен")
+
+        if self.state is FailsafeState.ALTITUDE_HOLD:
+            altitude_ok = self._is_altitude_stable(current_sensor)
+            if altitude_ok != self.altitude_was_ok:
+                events.append(
+                    "ALTITUDE_HOLD: высота стабильна"
+                    if altitude_ok
+                    else "ALTITUDE_HOLD: корректирую высоту"
+                )
+                self.altitude_was_ok = altitude_ok
+            if altitude_ok:
+                if self.altitude_stable_since is None:
+                    self.altitude_stable_since = now
+            else:
+                self.altitude_stable_since = None
+            altitude_stable = (
+                self.altitude_stable_since is not None
+                and now - self.altitude_stable_since >= cfg.altitude_hold_stable_s
+            )
+            if altitude_stable:
                 if cfg.turn_enabled and not self.turn_completed:
                     if current_sensor.yaw_deg is None:
                         self.state = FailsafeState.FAULT
@@ -211,14 +240,19 @@ class FailsafeController:
                         self.turn_progress_deg = 0.0
                         output_channels[cfg.yaw_channel] = cfg.turn_yaw_command
                         events.append(
-                            f"LEVELING -> TURNING: yaw target={abs(cfg.turn_degrees):.0f}deg "
+                            f"ALTITUDE_HOLD -> TURNING: yaw target={abs(cfg.turn_degrees):.0f}deg "
                             "по датчику yaw"
                         )
                 else:
                     self.state = FailsafeState.HOLDING
-                    events.append("LEVELING -> HOLDING")
+                    events.append("ALTITUDE_HOLD -> HOLDING")
 
-        if self.state in (FailsafeState.LEVELING, FailsafeState.TURNING, FailsafeState.HOLDING):
+        if self.state in (
+            FailsafeState.LEVELING,
+            FailsafeState.ALTITUDE_HOLD,
+            FailsafeState.TURNING,
+            FailsafeState.HOLDING,
+        ):
             self._set_hold_throttle(output_channels, current_sensor, now, events)
         return self._result(rebuild_rc_frame(frame, output_channels), output_channels, events, self.state)
 
@@ -235,6 +269,8 @@ class FailsafeController:
         self.last_takeover_throttle_time = None
         self.level_stable_since = None
         self.level_was_ok = None
+        self.altitude_stable_since = None
+        self.altitude_was_ok = None
         self.fault_frame = None
         self.turn_started_at = None
         self.turn_last_yaw_deg = None
@@ -253,12 +289,9 @@ class FailsafeController:
     def _hold_throttle(self, sensor: SensorSample, now: float) -> int:
         """Непрерывно удерживает высоту по барометру, интегратору и вариометру."""
         cfg = self.config
-        entry = cfg.level_throttle if self.takeover_entry_throttle is None else self.takeover_entry_throttle
-        previous_time = self.last_takeover_throttle_time
-        dt_takeover = 0.0 if previous_time is None else max(0.0, min(0.25, now - previous_time))
+        entry = self.config.rc_center if self.takeover_entry_throttle is None else self.takeover_entry_throttle
         self.last_takeover_throttle_time = now
-        step = max(0.0, cfg.takeover_throttle_step_per_s) * dt_takeover
-        command = min(float(cfg.level_throttle), entry + step) if entry < cfg.level_throttle else max(float(cfg.level_throttle), entry - step)
+        command = float(entry)
         self.climb_guard_active = False
         if self.hold_altitude_m is not None and sensor.altitude_m is not None:
             error = self.hold_altitude_m - sensor.altitude_m
@@ -277,7 +310,6 @@ class FailsafeController:
                 sensor.altitude_m - self.hold_altitude_m >= cfg.climb_guard_altitude_error_m
                 or (sensor.vario_m_s or 0.0) >= cfg.climb_guard_vario_m_s
             ):
-                command = min(command, float(cfg.climb_guard_max_throttle))
                 self.climb_guard_active = True
         return max(cfg.rc_min, min(cfg.rc_max, round(command)))
 
@@ -304,6 +336,17 @@ class FailsafeController:
             and sensor.pitch_deg is not None
             and abs(sensor.roll_deg - self.config.target_roll_deg) <= self.config.level_roll_tolerance_deg
             and abs(sensor.pitch_deg - self.config.target_pitch_deg) <= self.config.level_pitch_tolerance_deg
+        )
+
+    def _is_altitude_stable(self, sensor: SensorSample) -> bool:
+        """Проверяет ошибку высоты и вертикальную скорость перед разворотом."""
+        if self.hold_altitude_m is None or sensor.altitude_m is None:
+            return False
+        altitude_error = abs(sensor.altitude_m - self.hold_altitude_m)
+        vertical_speed = abs(sensor.vario_m_s or 0.0)
+        return (
+            altitude_error <= self.config.altitude_hold_tolerance_m
+            and vertical_speed <= self.config.altitude_hold_vario_tolerance_m_s
         )
 
     def relative_altitude(self, sensor: SensorSample | None) -> float | None:

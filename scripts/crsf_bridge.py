@@ -171,7 +171,11 @@ def main() -> int:
                         level_roll_tolerance_deg=float(failsafe_config["level_roll_tolerance_deg"]),
                         level_pitch_tolerance_deg=float(failsafe_config["level_pitch_tolerance_deg"]),
                         level_hold_s=float(failsafe_config["level_hold_s"]),
-                        level_throttle=int(failsafe_config["level_throttle"]),
+                        altitude_hold_stable_s=float(failsafe_config["altitude_hold_stable_s"]),
+                        altitude_hold_tolerance_m=float(failsafe_config["altitude_hold_tolerance_m"]),
+                        altitude_hold_vario_tolerance_m_s=float(
+                            failsafe_config["altitude_hold_vario_tolerance_m_s"]
+                        ),
                         altitude_hold_gain=float(failsafe_config["altitude_hold_gain"]),
                         altitude_hold_integral_gain=float(failsafe_config["altitude_hold_integral_gain"]),
                         altitude_hold_vario_gain=float(failsafe_config["altitude_hold_vario_gain"]),
@@ -180,10 +184,8 @@ def main() -> int:
                         turn_enabled=bool(failsafe_config["turn_enabled"]),
                         turn_degrees=float(failsafe_config["turn_degrees"]),
                         turn_yaw_command=int(failsafe_config["turn_yaw_command"]),
-                        takeover_throttle_step_per_s=float(failsafe_config["takeover_throttle_step_per_s"]),
                         climb_guard_altitude_error_m=float(failsafe_config["climb_guard_altitude_error_m"]),
                         climb_guard_vario_m_s=float(failsafe_config["climb_guard_vario_m_s"]),
-                        climb_guard_max_throttle=int(failsafe_config["climb_guard_max_throttle"]),
                     )
                 )
     except (OSError, ValueError, KeyError, TypeError) as error:
