@@ -56,8 +56,6 @@ class FailsafeConfig:
     turn_enabled: bool = True
     turn_degrees: float = 180.0
     turn_yaw_command: int = 1155
-    # Фиксированная длительность команды yaw без аварийного тайм-аута.
-    turn_duration_s: float = 3.5
     takeover_throttle_step_per_s: float = 50.0
     climb_guard_altitude_error_m: float = 0.20
     climb_guard_vario_m_s: float = 0.50
@@ -89,6 +87,7 @@ class FailsafeController:
         self.fault_frame: bytes | None = None
         self.hold_altitude_m: float | None = None
         self.altitude_zero_m: float | None = None
+        self.armed_latched = False
         self.altitude_integral_m_s = 0.0
         self.last_hold_time: float | None = None
         self.takeover_entry_throttle: int | None = None
@@ -116,19 +115,24 @@ class FailsafeController:
         events: list[str] = []
 
         if not armed:
-            self._reset_runtime()
+            self._reset_runtime(clear_arm_reference=True)
             return self._result(frame, output_channels, events, FailsafeState.LIVE)
 
         if sensor is not None and sensor.is_fresh(now, cfg.sensor_max_age_s):
             self.last_sensor = sensor
-            if self.altitude_zero_m is None and sensor.altitude_m is not None:
+            # Нулевая точка фиксируется только при переходе DISARM -> ARM.
+            # Во время LIVE и TAKEOVER она больше не пересчитывается.
+            if not self.armed_latched and sensor.altitude_m is not None:
                 self.altitude_zero_m = sensor.altitude_m
+                self.armed_latched = True
                 events.append(f"ALTITUDE_ZERO={self.altitude_zero_m:.2f}m")
 
         if takeover_state == "LIVE":
             if self.state is not FailsafeState.LIVE:
                 events.append(f"{self.state.value} -> LIVE")
-            self._reset_runtime()
+            # Возврат связи не является DISARM: опорная высота текущего ARM
+            # должна сохраниться для следующего CH7-перехвата.
+            self._reset_runtime(clear_arm_reference=False)
             return self._result(frame, output_channels, events, FailsafeState.LIVE)
 
         if self.state is FailsafeState.LIVE:
@@ -171,14 +175,13 @@ class FailsafeController:
         if self.state is FailsafeState.TURNING:
             output_channels[cfg.yaw_channel] = cfg.turn_yaw_command
             self._update_turn_progress(current_sensor.yaw_deg)
-            # Разворот длится заданное время; тайм-аут аварийного FAULT отсутствует.
-            elapsed_turn = now - (self.turn_started_at if self.turn_started_at is not None else now)
-            if elapsed_turn >= cfg.turn_duration_s:
+            # Разворот завершается по фактическому углу yaw, а не по времени.
+            if self.turn_progress_deg >= abs(cfg.turn_degrees):
                 self.state = FailsafeState.HOLDING
                 self.turn_completed = True
                 output_channels[cfg.yaw_channel] = cfg.rc_center
                 events.append(
-                    f"TURNING -> HOLDING: duration={elapsed_turn:.1f}s "
+                    f"TURNING -> HOLDING: yaw_target={abs(cfg.turn_degrees):.1f}deg "
                     f"progress={self.turn_progress_deg:.1f}deg"
                 )
             else:
@@ -207,7 +210,10 @@ class FailsafeController:
                         self.turn_last_yaw_deg = current_sensor.yaw_deg
                         self.turn_progress_deg = 0.0
                         output_channels[cfg.yaw_channel] = cfg.turn_yaw_command
-                        events.append(f"LEVELING -> TURNING: yaw +{cfg.turn_degrees:.0f}deg for {cfg.turn_duration_s:.1f}s")
+                        events.append(
+                            f"LEVELING -> TURNING: yaw target={abs(cfg.turn_degrees):.0f}deg "
+                            "по датчику yaw"
+                        )
                 else:
                     self.state = FailsafeState.HOLDING
                     events.append("LEVELING -> HOLDING")
@@ -216,11 +222,13 @@ class FailsafeController:
             self._set_hold_throttle(output_channels, current_sensor, now, events)
         return self._result(rebuild_rc_frame(frame, output_channels), output_channels, events, self.state)
 
-    def _reset_runtime(self) -> None:
-        """Сбрасывает автоматические состояния после DISARM или CH7=LINK_OK."""
+    def _reset_runtime(self, clear_arm_reference: bool) -> None:
+        """Сбрасывает автоматические состояния после CH7=LINK_OK или DISARM."""
         self.state = FailsafeState.LIVE
         self.hold_altitude_m = None
-        self.altitude_zero_m = None
+        if clear_arm_reference:
+            self.altitude_zero_m = None
+            self.armed_latched = False
         self.altitude_integral_m_s = 0.0
         self.last_hold_time = None
         self.takeover_entry_throttle = None

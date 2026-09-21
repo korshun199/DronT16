@@ -18,6 +18,8 @@ backups/
 
 # Локальные настройки и окружения
 .env
+# Адрес конкретной Raspberry Pi хранится только на рабочем ноутбуке.
+config/deployment.toml
 .venv/
 __pycache__/
 *.pyc

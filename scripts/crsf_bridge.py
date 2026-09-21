@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import sys
 import time
-import tomllib
 from pathlib import Path
 
 # Добавляем корень проекта для запуска скрипта из каталога scripts.
@@ -14,6 +13,7 @@ if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 from src.diagnostics.journal import Color, EventJournal
+from src.configuration import load_config_section
 from src.control.failsafe import FailsafeConfig, FailsafeController
 from src.receiver.crsf import (
     CRSF_LINK_STATISTICS,
@@ -29,24 +29,18 @@ from src.protocols.betaflight_msp_link import BetaflightMspLink, SensorSample
 
 def load_config() -> dict[str, int | str]:
     """Загружает параметры UART-моста."""
-    config_path = PROJECT_DIR / "config/bridge.toml"
-    with config_path.open("rb") as config_file:
-        return tomllib.load(config_file)["bridge"]
+    return load_config_section(PROJECT_DIR / "config/dront16.toml", "bridge")
 
 
 def load_takeover_config() -> dict[str, int | str]:
     """Загружает каналы и пороги управляемого перехвата."""
-    config_path = PROJECT_DIR / "config/simulator_filesafe.toml"
-    with config_path.open("rb") as config_file:
-        return tomllib.load(config_file)["control"]
+    return load_config_section(PROJECT_DIR / "config/dront16.toml", "simulation", "control")
 
 
 def load_bridge_sections() -> tuple[dict[str, object], dict[str, object]]:
     """Загружает отдельные настройки MSP и удержания после потери связи."""
-    config_path = PROJECT_DIR / "config/bridge.toml"
-    with config_path.open("rb") as config_file:
-        config = tomllib.load(config_file)
-    return config.get("msp", {}), config.get("failsafe", {})
+    config_path = PROJECT_DIR / "config/dront16.toml"
+    return load_config_section(config_path, "msp"), load_config_section(config_path, "failsafe")
 
 
 def main() -> int:
@@ -72,11 +66,9 @@ def main() -> int:
     simulator_command_file = Path(str(config.get("simulator_control_file", "/tmp/simulator_filesafe_command")))
     log_file = PROJECT_DIR / str(config.get("log_file", "simulator_filesafe.log"))
 
-    receiver_config_path = PROJECT_DIR / "config/receiver.toml"
-    with receiver_config_path.open("rb") as config_file:
-        receiver_config = tomllib.load(config_file)
-    mode_config = receiver_config["mode"]
-    mode_channel = int(receiver_config["receiver"]["mode_channel"]) - 1
+    receiver_config = load_config_section(PROJECT_DIR / "config/dront16.toml", "receiver")
+    mode_config = load_config_section(PROJECT_DIR / "config/dront16.toml", "receiver", "mode")
+    mode_channel = int(receiver_config["mode_channel"]) - 1
     mode_decoder = ReceiverModeDecoder(
         ModeThresholds(
             int(mode_config["low_max"]),
@@ -188,7 +180,6 @@ def main() -> int:
                         turn_enabled=bool(failsafe_config["turn_enabled"]),
                         turn_degrees=float(failsafe_config["turn_degrees"]),
                         turn_yaw_command=int(failsafe_config["turn_yaw_command"]),
-                        turn_duration_s=float(failsafe_config["turn_duration_s"]),
                         takeover_throttle_step_per_s=float(failsafe_config["takeover_throttle_step_per_s"]),
                         climb_guard_altitude_error_m=float(failsafe_config["climb_guard_altitude_error_m"]),
                         climb_guard_vario_m_s=float(failsafe_config["climb_guard_vario_m_s"]),
@@ -294,6 +285,8 @@ def main() -> int:
                     rc_frame_seen = True
                     channels = unpack_channels(frame[3:-1])
                     now = time.monotonic()
+                    # DISARM закрывает журнал после записи последней команды FC.
+                    close_journal_after_frame = False
                     if last_rc_time:
                         last_rc_interval_ms = (now - last_rc_time) * 1000.0
                         if last_rc_interval_ms >= rc_gap_log_ms:
@@ -347,12 +340,17 @@ def main() -> int:
                         )
                         last_link_lost = result.link_lost
                     if result.disarmed != last_disarmed:
+                        if not result.disarmed:
+                            # Новый файл испытания начинается с первого ARM.
+                            journal.begin_session()
                         journal.write(
                             "PILOT",
                             f"ARM SWITCH: CH{disarm_channel + 1}={channels[disarm_channel]} -> "
                             f"{'DISARM' if result.disarmed else 'ARM'}",
                             Color.RED if result.disarmed else Color.GREEN,
                         )
+                        if result.disarmed:
+                            close_journal_after_frame = True
                         last_disarmed = result.disarmed
 
                     if previous_state is TakeoverState.LIVE and result.state is TakeoverState.TAKEOVER:
@@ -368,6 +366,17 @@ def main() -> int:
 
                     output_frame = result.output_frame
                     failsafe_result = None
+                    if failsafe is not None and result.output_kind == "DISARM":
+                        # DISARM завершает текущий ARM-цикл и очищает опорную высоту.
+                        # Сам кадр DISARM уже сформирован мостом выше.
+                        failsafe.process(
+                            output_frame,
+                            unpack_channels(output_frame[3:-1]),
+                            "LIVE",
+                            latest_sensor,
+                            now,
+                            armed=False,
+                        )
                     if failsafe is not None and result.output_kind != "DISARM":
                         failsafe_result = failsafe.process(
                             output_frame,
@@ -419,6 +428,9 @@ def main() -> int:
                             f"kind={result.output_kind} received={received_frames} forwarded={forwarded_frames}",
                             Color.BLUE,
                         )
+                    if close_journal_after_frame:
+                        # Все действия DISARM уже зафиксированы, цикл завершён.
+                        journal.end_session()
                 # При TAKEOVER повторяем сохранённый кадр даже при временном
                 # отсутствии новых байтов от приёмника.
                 timeout_result = None
@@ -484,7 +496,7 @@ def main() -> int:
     except KeyboardInterrupt:
         journal.write("RPI", "STOP: мост остановлен оператором", Color.YELLOW)
         return 0
-    except (OSError, ValueError, KeyError, tomllib.TOMLDecodeError, RuntimeError) as error:
+    except (OSError, ValueError, KeyError, RuntimeError) as error:
         journal.write("RPI", f"ERROR: {error}", Color.RED)
         return 1
     finally:

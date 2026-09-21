@@ -29,7 +29,7 @@ DIRECT  →  CAPTURE  →  FOLLOW
 ./run.sh
 ```
 
-Режим failsafe выбирается в `config/bridge.toml`:
+Режим failsafe выбирается в секции `[failsafe]` файла `config/dront16.toml`:
 
 ```toml
 [failsafe]

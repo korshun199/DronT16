@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
+from src.configuration import load_config_section
 from src.core.state_machine import Mode
 
 
@@ -62,8 +62,7 @@ def load_osd_config(path: str | Path) -> OsdConfig:
     """Загружает TOML OSD и отклоняет нулевые или отрицательные размеры."""
     config_path = Path(path)
     try:
-        with config_path.open("rb") as config_file:
-            raw = tomllib.load(config_file)["osd"]
+        raw = load_config_section(config_path, "osd")
         colors = raw.get("colors", {})
         mode_colors = {
             mode: parse_color(colors[name])
@@ -98,7 +97,7 @@ def load_osd_config(path: str | Path) -> OsdConfig:
             output_offset_x=int(output.get("offset_x", 0)),
             output_offset_y=int(output.get("offset_y", 0)),
         )
-    except (OSError, KeyError, TypeError, ValueError, tomllib.TOMLDecodeError) as error:
+    except (OSError, KeyError, TypeError, ValueError) as error:
         raise ValueError(f"Не удалось прочитать конфигурацию OSD {config_path}: {error}") from error
     if min(result.capture_box_size, result.crosshair_arm, result.line_thickness,
            result.target_point_radius, result.mode_font_thickness,

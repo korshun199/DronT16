@@ -29,7 +29,19 @@ class EventJournal:
         self.source = source
         self.start_time = time.monotonic() if start_time is None else start_time
         self.sequence = 0
+        # Файл испытания активируется только после ARM и закрывается после DISARM.
+        self.session_active = False
         self.file = path.open("a", encoding="utf-8", buffering=1)
+
+    def begin_session(self) -> None:
+        """Начинает запись нового ARM-цикла, сохраняя предыдущие циклы."""
+        self.session_active = True
+        self.start_time = time.monotonic()
+        self.sequence = 0
+
+    def end_session(self) -> None:
+        """Завершает запись ARM-цикла, не удаляя его из файла."""
+        self.session_active = False
 
     def write(
         self,
@@ -50,8 +62,10 @@ class EventJournal:
         plain = f"{stamp} {message}"
         if console:
             print(f"{color}{plain}{Color.RESET}", flush=True)
-        self.file.write(plain + "\n")
-        self.file.flush()
+        # До ARM сообщения видны в терминале, но в файл испытания не попадают.
+        if self.session_active:
+            self.file.write(plain + "\n")
+            self.file.flush()
 
     def close(self) -> None:
         """Закрывает файл общего журнала."""

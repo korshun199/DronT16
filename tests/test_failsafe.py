@@ -54,7 +54,6 @@ def config(**overrides: object) -> FailsafeConfig:
         "level_hold_s": 1.0,
         "level_throttle": 992,
         "turn_yaw_command": 1155,
-        "turn_duration_s": 3.5,
     }
     values.update(overrides)
     return FailsafeConfig(**values)  # type: ignore[arg-type]
@@ -74,8 +73,8 @@ class FailsafeTests(unittest.TestCase):
         self.assertAlmostEqual(samples[-1].altitude_m or 0.0, 2.35)
         self.assertAlmostEqual(samples[-1].roll_deg or 0.0, 5.0)
 
-    def test_loss_levels_turns_three_point_five_seconds_then_holds(self) -> None:
-        """После CH7 контроллер крутит ровно 3,5 секунды и затем держит высоту."""
+    def test_loss_turns_until_yaw_target_then_holds(self) -> None:
+        """После CH7 контроллер крутит до фактического угла yaw и затем держит высоту."""
         controller = FailsafeController(config())
         channels = tuple([992] * 16)
         current = frame(channels)
@@ -89,11 +88,13 @@ class FailsafeTests(unittest.TestCase):
         self.assertEqual(turning.state, FailsafeState.TURNING)
         self.assertEqual(turning.yaw_command, 1155)
 
-        still_turning = controller.process(current, channels, "TAKEOVER", sensor(yaw=20.0, received_at=4.4), 4.4)
+        still_turning = controller.process(current, channels, "TAKEOVER", sensor(yaw=20.0, received_at=10.0), 10.0)
         self.assertEqual(still_turning.state, FailsafeState.TURNING)
-        holding = controller.process(current, channels, "TAKEOVER", sensor(yaw=20.0, received_at=4.7), 4.7)
+        self.assertEqual(still_turning.yaw_command, 1155)
+        holding = controller.process(current, channels, "TAKEOVER", sensor(yaw=190.0, received_at=10.2), 10.2)
         self.assertEqual(holding.state, FailsafeState.HOLDING)
         self.assertTrue(any("TURNING -> HOLDING" in event for event in holding.events))
+        self.assertTrue(any("yaw_target=180.0deg" in event for event in holding.events))
         self.assertEqual(holding.yaw_command, 992)
         self.assertNotIn("FAULT", " ".join(holding.events))
 
@@ -111,6 +112,40 @@ class FailsafeTests(unittest.TestCase):
         higher = controller.process(lower.output_frame, channels, "TAKEOVER", sensor(altitude=10.5, received_at=0.2), 0.2)
         self.assertGreater(lower.throttle_command, 992)
         self.assertLess(higher.throttle_command, lower.throttle_command)
+
+    def test_altitude_zero_is_latched_until_disarm(self) -> None:
+        """Нулевая высота фиксируется при ARM и не пересчитывается в LIVE/TAKEOVER."""
+        controller = FailsafeController(config())
+        channels = tuple([992] * 16)
+        current = frame(channels)
+
+        armed = controller.process(
+            current, channels, "LIVE", sensor(altitude=1.0, received_at=0.0), 0.0, armed=True
+        )
+        self.assertIn("ALTITUDE_ZERO=1.00m", armed.events)
+
+        live_again = controller.process(
+            current, channels, "LIVE", sensor(altitude=2.0, received_at=0.1), 0.1, armed=True
+        )
+        self.assertNotIn("ALTITUDE_ZERO=2.00m", live_again.events)
+        self.assertAlmostEqual(controller.relative_altitude(sensor(altitude=2.0)), 1.0)
+
+        takeover = controller.process(
+            current, channels, "TAKEOVER", sensor(altitude=2.0, received_at=0.2), 0.2, armed=True
+        )
+        self.assertNotIn("ALTITUDE_ZERO=2.00m", takeover.events)
+        self.assertAlmostEqual(controller.altitude_zero_m or 0.0, 1.0)
+
+        disarmed = controller.process(
+            current, channels, "LIVE", sensor(altitude=2.0, received_at=0.3), 0.3, armed=False
+        )
+        self.assertEqual(disarmed.state, FailsafeState.LIVE)
+        self.assertIsNone(controller.altitude_zero_m)
+
+        rearmed = controller.process(
+            current, channels, "LIVE", sensor(altitude=3.0, received_at=0.4), 0.4, armed=True
+        )
+        self.assertIn("ALTITUDE_ZERO=3.00m", rearmed.events)
 
     def test_stale_sensor_enters_fault_and_can_disarm(self) -> None:
         """Устаревшие MSP-данные переводят систему в FAULT с выбранным действием."""

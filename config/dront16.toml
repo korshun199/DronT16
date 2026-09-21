@@ -1,0 +1,213 @@
+# Единая рабочая конфигурация DronT16.
+# Все модули читают только свою секцию через src/configuration.py.
+# Секреты, IP Raspberry и SSH-пути находятся отдельно в deployment.toml.
+
+[video]
+# Источник камеры: auto выбирает доступный видеовход.
+source = "auto"
+# Режим вывода: auto выбирает J7 на Raspberry и web на ноутбуке.
+display = "auto"
+# Адрес и порт диагностического веб-просмотра.
+web_host = "127.0.0.1"
+web_port = 8080
+# Полноэкранный вывод HDMI на ноутбуке.
+hdmi_fullscreen = true
+# DRM-устройство композитного J7 Raspberry Pi.
+j7_device = "/dev/dri/by-path/platform-1f00144000.vec-card"
+# Файл программной команды для тестового SSH-пульта.
+control_file = "/tmp/dront16_command"
+
+[osd]
+# Размеры и положение графики OSD.
+capture_box_size = 53
+crosshair_arm = 8
+line_thickness = 2
+target_point_radius = 4
+mode_font_scale = 0.8
+mode_font_thickness = 2
+message_font_scale = 0.55
+message_font_thickness = 2
+mode_x = 20
+mode_y = 32
+center_x_percent = 50.0
+center_y_percent = 50.0
+center_offset_x = -10
+center_offset_y = -10
+capture_box_offset_x = 12
+capture_box_offset_y = 12
+
+[osd.colors]
+# Цвета режимов задаются в формате #RRGGBB.
+idle = "#f6efe8"
+capture = "#e3c70b"
+tracking = "#ff0000"
+lost = "#dc14ff"
+disabled = "#ff0000"
+return = "#ff8c00"
+
+[osd.output]
+# Геометрия видеовыхода J7.
+video_standard = "NTSC"
+fit = "stretch"
+scale_x = 1.0
+scale_y = 1.0
+offset_x = 0
+offset_y = 0
+
+[follow.camera]
+# Углы обзора и опорный центр камеры.
+horizontal_fov_deg = 90.0
+vertical_fov_deg = 60.0
+center_x_percent = 50.0
+center_y_percent = 50.0
+
+[follow.guidance]
+# Ограничения расчёта направления к выбранной цели.
+yaw_deadband_deg = 2.0
+pitch_deadband_deg = 2.0
+max_yaw_rate_deg_s = 30.0
+max_pitch_rate_deg_s = 15.0
+report_period_ms = 250
+
+[follow.msp]
+# Реальные команды сопровождения пока отключены.
+enabled = false
+transport = "dry-run"
+serial_port = "/dev/ttyAMA0"
+baudrate = 115200
+
+[follow.tracker]
+# Алгоритм удержания уже захваченной цели.
+algorithm = "csrt"
+
+[follow.verification]
+# Проверка, что отслеживается исходный объект, а не похожий фон.
+enabled = true
+method = "adaptive"
+min_similarity = 0.3
+max_bad_frames = 16
+adaptation_rate = 0.05
+foreground_margin_percent = 15.0
+
+[receiver]
+# Рабочий CRSF-вход от приёмника на Raspberry pin 10 / GPIO15.
+serial_port = "/dev/ttyAMA0"
+baudrate = 420000
+link_timeout_ms = 300
+mode_channel = 6
+report_period_ms = 250
+
+[receiver.mode]
+# Пороги режимов AUX-канала видеосистемы.
+low_max = 700
+high_min = 1700
+debounce_frames = 3
+
+[bridge]
+# Параметры моста CRSF между приёмником и полётником.
+forward_frame_type = 22
+forward_link_statistics = true
+report_period_ms = 500
+verbose_frames = false
+sensor_terminal = false
+control_file = "/tmp/dront16_command"
+simulator_control_file = "/tmp/simulator_filesafe_command"
+log_file = "simulator_filesafe.log"
+pilot_log_period_ms = 500
+command_log_period_ms = 100
+rc_gap_log_ms = 100
+
+[msp]
+# MSP-датчики FC через Raspberry UART1: pin 27/28.
+enabled = true
+serial_port = "/dev/ttyAMA1"
+baudrate = 115200
+request_period_ms = 50
+sensor_max_age_ms = 250
+
+[failsafe]
+# Только удержание высоты, стабилизация и разворот. Посадки нет.
+enabled = true
+mode = "CH7"
+roll_channel = 1
+pitch_channel = 2
+throttle_channel = 3
+yaw_channel = 4
+rc_center = 992
+rc_min = 191
+rc_max = 1792
+target_roll_deg = 0.0
+target_pitch_deg = 0.0
+correction_per_degree = 18.0
+max_correction = 250
+fault_action = "HOLD"
+disarm_channel = 5
+disarm_value = 191
+stabilization_channel = 0
+stabilization_value = 1500
+level_roll_tolerance_deg = 5.0
+level_pitch_tolerance_deg = 5.0
+level_hold_s = 1.0
+level_throttle = 992
+altitude_hold_gain = 80.0
+altitude_hold_integral_gain = 12.0
+altitude_hold_vario_gain = 35.0
+max_altitude_correction = 120
+max_altitude_integral_correction = 80
+turn_enabled = true
+turn_degrees = 180.0
+turn_yaw_command = 1155
+takeover_throttle_step_per_s = 50.0
+climb_guard_altitude_error_m = 0.20
+climb_guard_vario_m_s = 0.50
+climb_guard_max_throttle = 850
+
+[simulation]
+# Старый автономный симулятор запускается только отдельным явным тестом.
+duration_s = 0.0
+step_ms = 100
+packet_period_ms = 500
+log_file = "simulator_filesafe.log"
+
+[simulation.flight_controller]
+name = "Betaflight HAKRCF405V2"
+crsf_port = "/simulated/ttyAMA0"
+msp_port = "/simulated/uart1"
+baudrate = 420000
+heading_deg = 184.6
+altitude_m = 38.2
+speed_m_s = 12.7
+
+[simulation.object]
+object_id = "TARGET_001"
+x = 412.0
+y = 238.0
+width = 86.0
+height = 74.0
+confidence = 0.87
+
+[simulation.failsafe]
+turn_degrees = 180.0
+turn_rate_deg_s = 60.0
+use_last_packet = true
+
+[simulation.control]
+loss_channel = 7
+link_ok_max = 700
+link_lost_min = 1700
+disarm_channel = 5
+disarm_active_max = 700
+arm_active_min = 1700
+throttle_channel = 3
+throttle_zero = 191
+throttle_ramp_s = 5.0
+command_file = "/tmp/simulator_filesafe_command"
+
+[logging]
+# Рабочий журнал начинается с ARM и завершается после DISARM.
+file = "simulator_filesafe.log"
+sensor_terminal = false
+
+[runtime]
+# Запуск CRSF/MSP-моста вместе с видео на Raspberry Pi.
+start_receiver_bridge = true

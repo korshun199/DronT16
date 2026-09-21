@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from src.configuration import load_project_config
 
 
 @dataclass(frozen=True)
@@ -81,11 +82,13 @@ def load_follow_config(path: str | Path) -> FollowConfig:
     """Загружает TOML и проверяет параметры до запуска сопровождения."""
     config_path = Path(path)
     try:
-        with config_path.open("rb") as config_file:
-            raw = tomllib.load(config_file)
-    except (OSError, tomllib.TOMLDecodeError) as error:
+        raw = load_project_config(config_path)
+    except ValueError as error:
         raise ValueError(f"Не удалось прочитать конфигурацию {config_path}: {error}") from error
     try:
+        # Центральный конфиг содержит follow.*, старый отдельный TOML остаётся
+        # совместимым до завершения миграции.
+        raw = raw.get("follow", raw)
         camera = raw["camera"]
         guidance = raw["guidance"]
         msp = raw["msp"]

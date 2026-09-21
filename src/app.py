@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from pathlib import Path
 
 import cv2
 
+from src.configuration import load_config_section
 from src.control.follow_config import load_follow_config
 from src.control.guidance import calculate_guidance
 from src.core.state_machine import Command, Mode, TargetBox, TargetStateMachine
@@ -22,23 +24,23 @@ from src.video.capture import VideoSource
 def parse_args() -> argparse.Namespace:
     """Читает параметры источника видео из командной строки."""
     parser = argparse.ArgumentParser(description="Визуальный прототип DronT16")
-    parser.add_argument("--source", default="0", help="индекс камеры или путь к видеофайлу")
-    parser.add_argument("--display", choices=("hdmi", "web", "j7", "both"), default="hdmi",
+    parser.add_argument("--source", default=None, help="устаревшее переопределение источника видео")
+    parser.add_argument("--display", choices=("hdmi", "web", "j7", "both"), default=None,
                         help="вывод: веб-морда, HDMI, J7 или оба тестовых экрана")
-    parser.add_argument("--web-host", default="127.0.0.1", help="адрес веб-просмотра")
-    parser.add_argument("--web-port", type=int, default=8080, help="порт веб-просмотра")
+    parser.add_argument("--web-host", default=None, help="устаревшее переопределение адреса веб-просмотра")
+    parser.add_argument("--web-port", type=int, default=None, help="устаревшее переопределение порта веб-просмотра")
     parser.add_argument("--hdmi-x", type=int, default=0, help="X внешнего HDMI-экрана")
     parser.add_argument("--hdmi-y", type=int, default=0, help="Y внешнего HDMI-экрана")
-    parser.add_argument("--fullscreen", action="store_true", help="полноэкранный вывод HDMI")
+    parser.add_argument("--fullscreen", action="store_true", default=None, help="полноэкранный вывод HDMI")
     parser.add_argument("--capture-size", type=int, default=160, help="размер центральной области захвата")
-    parser.add_argument("--osd-config", default="config/osd.toml",
-                        help="конфигурация размеров и оформления OSD")
-    parser.add_argument("--follow-config", default="config/follow.toml",
-                        help="конфигурация модуля сопровождения")
-    parser.add_argument("--j7-device", default="/dev/dri/by-path/platform-1f00144000.vec-card",
-                        help="DRM-устройство композитного J7")
-    parser.add_argument("--control-file", default="/tmp/dront16_command",
-                        help="файл команд временного SSH-пульта")
+    parser.add_argument("--config", default="config/dront16.toml",
+                        help="единая конфигурация DronT16")
+    parser.add_argument("--osd-config", default=None,
+                        help="устаревший отдельный путь OSD; по умолчанию используется --config")
+    parser.add_argument("--follow-config", default=None,
+                        help="устаревший отдельный путь follow; по умолчанию используется --config")
+    parser.add_argument("--j7-device", default=None, help="устаревшее переопределение DRM-устройства J7")
+    parser.add_argument("--control-file", default=None, help="устаревшее переопределение файла команд")
     return parser.parse_args()
 
 
@@ -79,12 +81,24 @@ def main() -> int:
     """Запускает цикл видео, обработки команд и экранного сопровождения."""
     args = parse_args()
     try:
-        follow_config = load_follow_config(args.follow_config)
-        osd_config = load_osd_config(args.osd_config)
+        video_config = load_config_section(args.config, "video")
+        follow_config = load_follow_config(args.follow_config or args.config)
+        osd_config = load_osd_config(args.osd_config or args.config)
     except ValueError as error:
         print(f"[DronT16] Ошибка конфигурации сопровождения: {error}", file=sys.stderr)
         return 2
-    source = VideoSource(args.source)
+    source_name = str(args.source or video_config["source"])
+    display_name = str(args.display or video_config["display"])
+    web_host = str(args.web_host or video_config["web_host"])
+    web_port = int(args.web_port or video_config["web_port"])
+    j7_device = str(args.j7_device or video_config["j7_device"])
+    control_file = str(args.control_file or video_config["control_file"])
+    fullscreen = bool(video_config["hdmi_fullscreen"] if args.fullscreen is None else args.fullscreen)
+    if display_name == "auto":
+        display_name = "j7" if sys.platform.startswith("linux") and Path("/proc/device-tree/model").exists() else "web"
+    if display_name not in {"hdmi", "web", "j7", "both"}:
+        raise ValueError("video.display должен быть auto, hdmi, web, j7 или both")
+    source = VideoSource(source_name)
     machine = TargetStateMachine()
     verifier = TargetVerifier(
         follow_config.verification.min_similarity,
@@ -96,13 +110,13 @@ def main() -> int:
     tracker = TargetTracker(verifier, follow_config.tracker.algorithm)
     hub = FrameHub()
     display_mode = Mode.IDLE
-    if args.display in ("web", "both"):
-        start_web_preview(hub, args.web_host, args.web_port)
+    if display_name in ("web", "both"):
+        start_web_preview(hub, web_host, web_port)
     j7_output = None
-    if args.display == "j7":
+    if display_name == "j7":
         from src.interface.j7_output import J7Output
         j7_output = J7Output(
-            args.j7_device, osd_config.output_fit, osd_config.output_scale_x,
+            j7_device, osd_config.output_fit, osd_config.output_scale_x,
             osd_config.output_scale_y, osd_config.output_offset_x,
             osd_config.output_offset_y, osd_config.video_standard,
         )
@@ -118,10 +132,10 @@ def main() -> int:
                 "штатное OSD может исказиться.",
                 file=sys.stderr, flush=True,
             )
-    if args.display in ("hdmi", "both"):
+    if display_name in ("hdmi", "both"):
         cv2.namedWindow("DronT16", cv2.WINDOW_NORMAL)
         cv2.moveWindow("DronT16", args.hdmi_x, args.hdmi_y)
-        if args.fullscreen:
+        if fullscreen:
             cv2.setWindowProperty("DronT16", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
     message = "1: DIRECT | 2: CAPTURE | 3: FOLLOW | Q: EXIT"
     last_report = 0.0
@@ -157,13 +171,13 @@ def main() -> int:
             if j7_output is not None:
                 j7_output.write(rendered)
             key = -1
-            if args.display in ("hdmi", "both"):
+            if display_name in ("hdmi", "both"):
                 cv2.imshow("DronT16", rendered)
                 key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
                 break
             web_command = hub.next_command()
-            remote_command = read_remote_command(args.control_file)
+            remote_command = read_remote_command(control_file)
             # На временном SSH-пульте ноутбука используются три положения:
             # 1 — свободный режим, 2 — захват, 3 — сопровождение.
             key_command = {ord("1"): Command.ABORT, ord("2"): Command.CAPTURE,
