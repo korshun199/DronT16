@@ -92,8 +92,34 @@ class TakeoverTests(unittest.TestCase):
         self.assertEqual(unpack_channels(repeated.output_frame[3:-1])[2], 1369)
         self.assertEqual(extract_raw_frames(bytearray(repeated.output_frame)), [repeated.output_frame])
 
-    def test_takeover_holds_throttle_when_landing_controller_is_active(self) -> None:
-        """При посадочном модуле мост не снижает газ самостоятельно."""
+    def test_real_mode_enters_takeover_after_receiver_timeout(self) -> None:
+        """При отсутствии RC real-режим включает takeover, а возврат кадра его снимает."""
+        first = make_frame(make_channels(throttle=1500))
+        live_with_ch7_high = make_frame(make_channels(ch7=1792, throttle=1500))
+        ignored_ch7 = self.controller.process(
+            live_with_ch7_high,
+            unpack_channels(live_with_ch7_high[3:-1]),
+            now=1.0,
+            force_link_lost=False,
+        )
+        self.assertEqual(ignored_ch7.state, TakeoverState.LIVE)
+        self.controller.process(first, unpack_channels(first[3:-1]), now=1.1, force_link_lost=False)
+        timeout = self.controller.process_receiver_timeout(1.41)
+        self.assertIsNotNone(timeout)
+        self.assertEqual(timeout.state, TakeoverState.TAKEOVER)
+        self.assertTrue(timeout.link_lost)
+        restored = make_frame(make_channels(ch7=1792, throttle=1600))
+        result = self.controller.process(
+            restored,
+            unpack_channels(restored[3:-1]),
+            now=1.5,
+            force_link_lost=False,
+        )
+        self.assertEqual(result.state, TakeoverState.LIVE)
+        self.assertEqual(result.output_frame, restored)
+
+    def test_takeover_holds_throttle_when_failsafe_is_active(self) -> None:
+        """При активном failsafe мост не снижает газ самостоятельно."""
         controller = TakeoverController(
             TakeoverConfig(6, 1700, 700, 4, 700, 1700, 2, 191, 5.0, False)
         )

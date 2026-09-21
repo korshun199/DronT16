@@ -14,7 +14,7 @@ if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 from src.diagnostics.journal import Color, EventJournal
-from src.control.landing import LandingConfig, LandingController
+from src.control.failsafe import FailsafeConfig, FailsafeController
 from src.receiver.crsf import (
     CRSF_LINK_STATISTICS,
     CRSF_RC_CHANNELS_PACKED,
@@ -42,18 +42,21 @@ def load_takeover_config() -> dict[str, int | str]:
 
 
 def load_bridge_sections() -> tuple[dict[str, object], dict[str, object]]:
-    """Загружает отдельные настройки MSP и посадочного автомата."""
+    """Загружает отдельные настройки MSP и удержания после потери связи."""
     config_path = PROJECT_DIR / "config/bridge.toml"
     with config_path.open("rb") as config_file:
         config = tomllib.load(config_file)
-    return config.get("msp", {}), config.get("landing", {})
+    return config.get("msp", {}), config.get("failsafe", {})
 
 
 def main() -> int:
     """Передаёт RC, повторяет последний кадр при CH7 и даёт приоритет DISARM."""
     config = load_config()
     control = load_takeover_config()
-    msp_config, landing_config = load_bridge_sections()
+    msp_config, failsafe_config = load_bridge_sections()
+    failsafe_mode = str(failsafe_config.get("mode", "CH7")).upper()
+    if failsafe_mode not in {"CH7", "REAL"}:
+        raise ValueError("failsafe.mode должен быть CH7 или real")
     serial_port = str(config["serial_port"])
     baudrate = int(config["baudrate"])
     frame_type = int(config["forward_frame_type"])
@@ -116,8 +119,8 @@ def main() -> int:
             throttle_channel=throttle_channel,
             throttle_zero=throttle_zero,
             throttle_ramp_s=throttle_ramp_s,
-            # При посадочном контроллере газ меняет только landing.py.
-            ramp_throttle=not bool(landing_config.get("enabled", False)),
+            # При активном failsafe газ меняет только failsafe.py.
+            ramp_throttle=not bool(failsafe_config.get("enabled", False)),
         )
     )
     last_link_lost: bool | None = None
@@ -133,7 +136,7 @@ def main() -> int:
     last_link_statistics_log = 0.0
     journal = EventJournal(log_file, "BRIDGE")
     msp_link: BetaflightMspLink | None = None
-    landing: LandingController | None = None
+    failsafe: FailsafeController | None = None
     latest_sensor: SensorSample | None = None
     last_sensor_log = 0.0
     last_repetitive_event_log = 0.0
@@ -149,60 +152,51 @@ def main() -> int:
                 int(msp_config["baudrate"]),
                 int(msp_config["request_period_ms"]) / 1000.0,
             )
-            if bool(landing_config.get("enabled", False)):
-                landing = LandingController(
-                    LandingConfig(
-                        roll_channel=int(landing_config["roll_channel"]) - 1,
-                        pitch_channel=int(landing_config["pitch_channel"]) - 1,
-                        throttle_channel=int(landing_config["throttle_channel"]) - 1,
-                        rc_center=int(landing_config["rc_center"]),
-                        rc_min=int(landing_config["rc_min"]),
-                        rc_max=int(landing_config["rc_max"]),
-                        target_roll_deg=float(landing_config["target_roll_deg"]),
-                        target_pitch_deg=float(landing_config["target_pitch_deg"]),
-                        correction_per_degree=float(landing_config["correction_per_degree"]),
-                        max_correction=int(landing_config["max_correction"]),
-                        descent_start_after_s=float(landing_config["descent_start_after_s"]),
-                        throttle_step_per_s=float(landing_config["throttle_step_per_s"]),
-                        throttle_min=int(landing_config["throttle_min"]),
+            if bool(failsafe_config.get("enabled", False)):
+                failsafe = FailsafeController(
+                    FailsafeConfig(
+                        roll_channel=int(failsafe_config["roll_channel"]) - 1,
+                        pitch_channel=int(failsafe_config["pitch_channel"]) - 1,
+                        throttle_channel=int(failsafe_config["throttle_channel"]) - 1,
+                        yaw_channel=int(failsafe_config["yaw_channel"]) - 1,
+                        rc_center=int(failsafe_config["rc_center"]),
+                        rc_min=int(failsafe_config["rc_min"]),
+                        rc_max=int(failsafe_config["rc_max"]),
+                        target_roll_deg=float(failsafe_config["target_roll_deg"]),
+                        target_pitch_deg=float(failsafe_config["target_pitch_deg"]),
+                        correction_per_degree=float(failsafe_config["correction_per_degree"]),
+                        max_correction=int(failsafe_config["max_correction"]),
                         sensor_max_age_s=int(msp_config["sensor_max_age_ms"]) / 1000.0,
-                        landed_altitude_m=float(landing_config["landed_altitude_m"]),
-                        landed_vario_abs_m_s=float(landing_config["landed_vario_abs_m_s"]),
-                        landed_hold_s=float(landing_config["landed_hold_s"]),
-                        fault_action=str(landing_config["fault_action"]),
-                        disarm_channel=int(landing_config["disarm_channel"]) - 1,
-                        disarm_value=int(landing_config["disarm_value"]),
+                        fault_action=str(failsafe_config["fault_action"]),
+                        disarm_channel=int(failsafe_config["disarm_channel"]) - 1,
+                        disarm_value=int(failsafe_config["disarm_value"]),
                         stabilization_channel=(
-                            int(landing_config["stabilization_channel"]) - 1
-                            if int(landing_config["stabilization_channel"]) > 0
+                            int(failsafe_config["stabilization_channel"]) - 1
+                            if int(failsafe_config["stabilization_channel"]) > 0
                             else None
                         ),
-                        stabilization_value=int(landing_config["stabilization_value"]),
-                        level_roll_tolerance_deg=float(landing_config["level_roll_tolerance_deg"]),
-                        level_pitch_tolerance_deg=float(landing_config["level_pitch_tolerance_deg"]),
-                        level_hold_s=float(landing_config["level_hold_s"]),
-                        level_throttle=int(landing_config["level_throttle"]),
-                        altitude_hold_gain=float(landing_config["altitude_hold_gain"]),
-                        altitude_hold_integral_gain=float(landing_config["altitude_hold_integral_gain"]),
-                        altitude_hold_vario_gain=float(landing_config["altitude_hold_vario_gain"]),
-                        max_altitude_correction=int(landing_config["max_altitude_correction"]),
-                        max_altitude_integral_correction=int(landing_config["max_altitude_integral_correction"]),
-                        landing_throttle_barrier=int(landing_config["landing_throttle_barrier"]),
-                        turn_enabled=bool(landing_config["turn_enabled"]),
-                        turn_degrees=float(landing_config["turn_degrees"]),
-                        turn_yaw_command=int(landing_config["turn_yaw_command"]),
-                        turn_timeout_s=float(landing_config["turn_timeout_s"]),
-                        turn_duration_s=float(landing_config["turn_duration_s"]),
-                        turn_heading_tolerance_deg=float(landing_config["turn_heading_tolerance_deg"]),
-                        yaw_channel=int(landing_config["yaw_channel"]) - 1,
-                        takeover_throttle_step_per_s=float(landing_config["takeover_throttle_step_per_s"]),
-                        climb_guard_altitude_error_m=float(landing_config["climb_guard_altitude_error_m"]),
-                        climb_guard_vario_m_s=float(landing_config["climb_guard_vario_m_s"]),
-                        climb_guard_max_throttle=int(landing_config["climb_guard_max_throttle"]),
+                        stabilization_value=int(failsafe_config["stabilization_value"]),
+                        level_roll_tolerance_deg=float(failsafe_config["level_roll_tolerance_deg"]),
+                        level_pitch_tolerance_deg=float(failsafe_config["level_pitch_tolerance_deg"]),
+                        level_hold_s=float(failsafe_config["level_hold_s"]),
+                        level_throttle=int(failsafe_config["level_throttle"]),
+                        altitude_hold_gain=float(failsafe_config["altitude_hold_gain"]),
+                        altitude_hold_integral_gain=float(failsafe_config["altitude_hold_integral_gain"]),
+                        altitude_hold_vario_gain=float(failsafe_config["altitude_hold_vario_gain"]),
+                        max_altitude_correction=int(failsafe_config["max_altitude_correction"]),
+                        max_altitude_integral_correction=int(failsafe_config["max_altitude_integral_correction"]),
+                        turn_enabled=bool(failsafe_config["turn_enabled"]),
+                        turn_degrees=float(failsafe_config["turn_degrees"]),
+                        turn_yaw_command=int(failsafe_config["turn_yaw_command"]),
+                        turn_duration_s=float(failsafe_config["turn_duration_s"]),
+                        takeover_throttle_step_per_s=float(failsafe_config["takeover_throttle_step_per_s"]),
+                        climb_guard_altitude_error_m=float(failsafe_config["climb_guard_altitude_error_m"]),
+                        climb_guard_vario_m_s=float(failsafe_config["climb_guard_vario_m_s"]),
+                        climb_guard_max_throttle=int(failsafe_config["climb_guard_max_throttle"]),
                     )
                 )
     except (OSError, ValueError, KeyError, TypeError) as error:
-        journal.write("RPI", f"ERROR: MSP/landing config: {error}", Color.RED)
+        journal.write("RPI", f"ERROR: MSP/failsafe config: {error}", Color.RED)
         journal.close()
         return 1
 
@@ -232,13 +226,13 @@ def main() -> int:
     journal.write(
         "RPI",
         f"CONFIG: CH{loss_channel + 1}=LINK_LOST CH{disarm_channel + 1}=DISARM "
-        f"ARM>={arm_active_min} DISARM<={disarm_active_max}",
+        f"ARM>={arm_active_min} DISARM<={disarm_active_max} FAILSAFE_MODE={failsafe_mode}",
         Color.CYAN,
     )
     journal.write("RPI", "PORT: RX CRSF -> bridge -> FC UART1; реальные RC-кадры изменяются только для DISARM", Color.BLUE)
     if msp_link is not None:
         journal.write("RPI", f"PORT: MSP SENSOR={msp_config['serial_port']} baud={msp_config['baudrate']}", Color.BLUE)
-        journal.write("RPI", f"CONFIG: LANDING={'ON' if landing is not None else 'OFF'}; FC PID сохраняется", Color.CYAN)
+        journal.write("RPI", f"CONFIG: FAILSAFE={'ON' if failsafe is not None else 'OFF'}; FC PID сохраняется", Color.CYAN)
     else:
         journal.write("RPI", "PORT: MSP SENSOR отключён; используется только CRSF-мост", Color.YELLOW)
     print("[CRSF BRIDGE] Ctrl+C — остановка передачи", flush=True)
@@ -252,8 +246,8 @@ def main() -> int:
                         now_sensor = time.monotonic()
                         if now_sensor - last_sensor_log >= 0.1 and sample.complete:
                             relative_text = ""
-                            if landing is not None:
-                                relative_altitude = landing.relative_altitude(sample)
+                            if failsafe is not None:
+                                relative_altitude = failsafe.relative_altitude(sample)
                                 if relative_altitude is not None:
                                     relative_text = f" relative_altitude={relative_altitude:.2f}m"
                             mag_text = ""
@@ -336,7 +330,13 @@ def main() -> int:
                             Color.CYAN,
                         )
 
-                    result = takeover.process(frame, channels, now)
+                    # В REAL CH7 игнорируется: takeover начинается только по тайм-ауту входных кадров.
+                    result = takeover.process(
+                        frame,
+                        channels,
+                        now,
+                        force_link_lost=False if failsafe_mode == "REAL" else None,
+                    )
                     log_controller_events(result.events, now)
                     if result.link_lost != last_link_lost:
                         journal.write(
@@ -367,9 +367,9 @@ def main() -> int:
                         send_simulator_event("DISARM")
 
                     output_frame = result.output_frame
-                    landing_result = None
-                    if landing is not None and result.output_kind != "DISARM":
-                        landing_result = landing.process(
+                    failsafe_result = None
+                    if failsafe is not None and result.output_kind != "DISARM":
+                        failsafe_result = failsafe.process(
                             output_frame,
                             unpack_channels(output_frame[3:-1]),
                             result.state.value,
@@ -377,24 +377,24 @@ def main() -> int:
                             now,
                             armed=not result.disarmed,
                         )
-                        for event in landing_result.events:
+                        for event in failsafe_result.events:
                             event_kind = "SAFETY" if "FAULT" in event else "DECISION"
                             color = Color.RED if event_kind == "SAFETY" else Color.YELLOW
                             journal.write("RPI", f"{event_kind}: {event}", color)
-                        output_frame = landing_result.output_frame
-                        if landing_result.state.value != "LIVE" and (
-                            landing_result.events
+                        output_frame = failsafe_result.output_frame
+                        if failsafe_result.state.value != "LIVE" and (
+                            failsafe_result.events
                             or now - last_command_log >= command_log_period_s
                         ):
                             command_channels = unpack_channels(output_frame[3:-1])
                             journal.write(
                                 "RPI",
-                                f"COMMAND TO FC: kind={result.output_kind} state={landing_result.state.value} "
+                                f"COMMAND TO FC: kind={result.output_kind} state={failsafe_result.state.value} "
                                 f"{format_channels(command_channels)}",
                                 Color.RED,
                             )
                             last_command_log = now
-                        if landing_result.disarm_requested:
+                        if failsafe_result.disarm_requested:
                             journal.write("RPI", "COMMAND TO FC: RC CH5 DISARM; MOTORS OFF", Color.RED)
                     bridge_uart.write_frame(output_frame)
                     forwarded_frames += 1
@@ -421,11 +421,20 @@ def main() -> int:
                         )
                 # При TAKEOVER повторяем сохранённый кадр даже при временном
                 # отсутствии новых байтов от приёмника.
-                timeout_result = takeover.repeat_without_receiver(time.monotonic()) if not rc_frame_seen else None
+                timeout_result = None
+                if not rc_frame_seen:
+                    timeout_now = time.monotonic()
+                    receiver_timed_out = bool(last_rc_time and timeout_now - last_rc_time >= timeout_s)
+                    if failsafe_mode == "REAL" and receiver_timed_out:
+                        timeout_result = takeover.process_receiver_timeout(timeout_now)
+                        if timeout_result is not None and timeout_result.state is TakeoverState.TAKEOVER:
+                            journal.write("PILOT", "CRSF TIMEOUT: реальная потеря связи; включён TAKEOVER", Color.YELLOW)
+                    else:
+                        timeout_result = takeover.repeat_without_receiver(timeout_now)
                 if timeout_result is not None:
                     output_frame = timeout_result.output_frame
-                    if landing is not None:
-                        timeout_landing = landing.process(
+                    if failsafe is not None:
+                        timeout_failsafe = failsafe.process(
                             output_frame,
                             unpack_channels(output_frame[3:-1]),
                             timeout_result.state.value,
@@ -433,10 +442,10 @@ def main() -> int:
                             time.monotonic(),
                             armed=True,
                         )
-                        for event in timeout_landing.events:
+                        for event in timeout_failsafe.events:
                             journal.write("RPI", f"{'SAFETY' if 'FAULT' in event else 'DECISION'}: {event}", Color.RED)
-                        output_frame = timeout_landing.output_frame
-                        if timeout_landing.disarm_requested:
+                        output_frame = timeout_failsafe.output_frame
+                        if timeout_failsafe.disarm_requested:
                             journal.write("RPI", "COMMAND TO FC: RC CH5 DISARM; MOTORS OFF", Color.RED)
                     bridge_uart.write_frame(output_frame)
                     forwarded_frames += 1

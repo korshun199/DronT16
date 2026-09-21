@@ -58,13 +58,19 @@ class TakeoverController:
         self.lockout_until_link_ok = False
         self.last_disarmed: bool | None = None
 
-    def process(self, frame: bytes, channels: tuple[int, ...], now: float | None = None) -> TakeoverResult:
+    def process(
+        self,
+        frame: bytes,
+        channels: tuple[int, ...],
+        now: float | None = None,
+        force_link_lost: bool | None = None,
+    ) -> TakeoverResult:
         """Обрабатывает один кадр и возвращает ровно один кадр для FC."""
         current_time = 0.0 if now is None else now
         cfg = self.config
         link_value = channels[cfg.loss_channel]
         disarm_value = channels[cfg.disarm_channel]
-        link_lost = link_value >= cfg.link_lost_min
+        link_lost = link_value >= cfg.link_lost_min if force_link_lost is None else force_link_lost
         disarmed = disarm_value <= cfg.disarm_active_max
         armed = disarm_value >= cfg.arm_active_min
         events: list[str] = []
@@ -144,8 +150,17 @@ class TakeoverController:
             tuple(events),
         )
 
+    def process_receiver_timeout(self, now: float) -> TakeoverResult | None:
+        """Включает takeover после реальной потери входных RC-кадров."""
+        if self.last_live_frame is None:
+            return None
+        if self.state is not TakeoverState.LIVE:
+            return self.repeat_without_receiver(now)
+        channels = tuple(unpack_channels(self.last_live_frame[3:-1]))
+        return self.process(self.last_live_frame, channels, now, force_link_lost=True)
+
     def _ramped_frame(self, current_time: float) -> bytes:
-        """Формирует кадр; при посадке сохраняет газ без самостоятельного снижения."""
+        """Формирует кадр; активный failsafe меняет газ только в своём контроллере."""
         if self.frozen_frame is None or self.frozen_channels is None:
             raise RuntimeError("Нет сохранённого кадра для рампы газа")
         if not self.config.ramp_throttle:
