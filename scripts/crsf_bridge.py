@@ -48,14 +48,16 @@ def main() -> int:
     config = load_config()
     control = load_takeover_config()
     msp_config, failsafe_config = load_bridge_sections()
+    receiver_config = load_config_section(PROJECT_DIR / "config/dront16.toml", "receiver")
+    mode_config = load_config_section(PROJECT_DIR / "config/dront16.toml", "receiver", "mode")
     failsafe_mode = str(failsafe_config.get("mode", "CH7")).upper()
     if failsafe_mode not in {"CH7", "REAL"}:
         raise ValueError("failsafe.mode должен быть CH7 или real")
-    serial_port = str(config["serial_port"])
-    baudrate = int(config["baudrate"])
+    serial_port = str(receiver_config["serial_port"])
+    baudrate = int(receiver_config["baudrate"])
     frame_type = int(config["forward_frame_type"])
     forward_link_statistics = bool(config.get("forward_link_statistics", True))
-    timeout_s = int(config["link_timeout_ms"]) / 1000.0
+    timeout_s = int(receiver_config["link_timeout_ms"]) / 1000.0
     report_period_s = int(config["report_period_ms"]) / 1000.0
     verbose_frames = bool(config.get("verbose_frames", False))
     sensor_terminal = bool(config.get("sensor_terminal", False))
@@ -66,8 +68,6 @@ def main() -> int:
     simulator_command_file = Path(str(config.get("simulator_control_file", "/tmp/simulator_filesafe_command")))
     log_file = PROJECT_DIR / str(config.get("log_file", "simulator_filesafe.log"))
 
-    receiver_config = load_config_section(PROJECT_DIR / "config/dront16.toml", "receiver")
-    mode_config = load_config_section(PROJECT_DIR / "config/dront16.toml", "receiver", "mode")
     mode_channel = int(receiver_config["mode_channel"]) - 1
     mode_decoder = ReceiverModeDecoder(
         ModeThresholds(
