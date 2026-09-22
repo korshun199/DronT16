@@ -26,13 +26,13 @@ DIRECT  →  CAPTURE  →  FOLLOW
 ## Быстрый запуск
 
 ```bash
-./run.sh
+./run
 ```
 
 Локальная проверка привязки датчиков без Raspberry и без команд полётнику:
 
 ```bash
-./run.sh sensor-test
+./run sensor-test
 ```
 
 Результат теста сохраняется в `runs/sensor_binding_test.log`, каталог не

@@ -202,13 +202,13 @@ FC Video OUT с OSD
 русскими комментариями.
 
 ```bash
-./run.sh
+./run
 ```
 
 Локальный безопасный тест привязки датчиков:
 
 ```bash
-./run.sh sensor-test
+./run sensor-test
 ```
 
 `sensor-test` использует настоящий `MspParser`, но синтетические MSPv1-кадры.
@@ -253,7 +253,7 @@ CRC, дробленый поток, единицы, GPS fix/свежесть, м
 ```text
 PROJECT.md                         # главная архитектура и план
 README.md                          # краткий запуск
-run.sh                             # единая команда запуска
+run                               # единая команда запуска
 config/dront16.toml                # рабочие параметры TOML
 src/protocols/betaflight_msp_link.py # read-only MSP и SensorSample
 src/control/failsafe.py            # удержание, горизонт и разворот
