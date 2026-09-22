@@ -34,12 +34,16 @@ main() {
     # Запускает приложение только с настройками из этого файла.
     ensure_environment
     cd "${PROJECT_DIR}"
-    if [[ "$#" -ne 0 ]]; then
-        log "Параметры не нужны: все настройки находятся внутри run.sh"
-        return 2
-    fi
     # Не открываем вторую копию камеры, если проект уже запущен systemd или
     # другим экземпляром run.sh.
+    if [[ "$#" -eq 1 && "$1" == "sensor-test" ]]; then
+        log "Запуск локального теста привязки датчиков; реальные порты отключены"
+        exec "${PYTHON_BIN}" "${PROJECT_DIR}/scripts/sensor_binding_test.py"
+    fi
+    if [[ "$#" -ne 0 ]]; then
+        log "Допустим только режим sensor-test; рабочий запуск параметров не требует"
+        return 2
+    fi
     if pgrep -af "${PROJECT_DIR}/.venv/bin/python3 -m src.app" >/dev/null 2>&1; then
         log "DronT16 уже запущен; второй экземпляр камеры не запускаю"
         return 0

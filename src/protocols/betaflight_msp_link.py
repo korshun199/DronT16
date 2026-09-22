@@ -7,6 +7,7 @@ Betaflight, который сохраняет PID и защиту моторов
 
 from __future__ import annotations
 
+import math
 import os
 import select
 import struct
@@ -19,6 +20,7 @@ from dataclasses import dataclass
 MSP_ATTITUDE = 108
 MSP_ALTITUDE = 109
 MSP_RAW_IMU = 102
+MSP_RAW_GPS = 106
 
 
 def msp_checksum(size: int, command: int, payload: bytes = b"") -> int:
@@ -55,6 +57,16 @@ class SensorSample:
     mag_y: int | None = None
     mag_z: int | None = None
     mag_received_at: float | None = None
+    # Состояние GPS из MSP_RAW_GPS.
+    gps_fix: int | None = None
+    gps_satellites: int | None = None
+    gps_latitude_deg: float | None = None
+    gps_longitude_deg: float | None = None
+    gps_altitude_m: float | None = None
+    gps_speed_m_s: float | None = None
+    gps_course_deg: float | None = None
+    gps_hdop: float | None = None
+    gps_received_at: float | None = None
 
     @property
     def complete(self) -> bool:
@@ -71,6 +83,33 @@ class SensorSample:
             now - self.altitude_received_at <= max_age_s
             and now - self.attitude_received_at <= max_age_s
         )
+
+    @property
+    def gps_valid(self) -> bool:
+        """Возвращает True только для валидного GPS fix с координатами."""
+        return (
+            self.gps_fix is not None
+            and self.gps_fix > 0
+            and self.gps_satellites is not None
+            and self.gps_satellites >= 4
+            and self.gps_latitude_deg is not None
+            and self.gps_longitude_deg is not None
+        )
+
+    def gps_is_fresh(self, now: float, max_age_s: float) -> bool:
+        """Проверяет, что последний GPS-ответ не устарел."""
+        return self.gps_valid and self.gps_received_at is not None and now - self.gps_received_at <= max_age_s
+
+    @property
+    def magnetic_heading_deg(self) -> float | None:
+        """Даёт диагностический курс по сырым X/Y магнитометра.
+
+        Это не заменяет откалиброванный курс Betaflight: масштаб, смещение,
+        наклон и ориентация платы должны быть подтверждены отдельно.
+        """
+        if self.mag_x is None or self.mag_y is None:
+            return None
+        return math.degrees(math.atan2(self.mag_y, self.mag_x)) % 360.0
 
 
 class MspParser:
@@ -90,6 +129,15 @@ class MspParser:
         self.mag_y: int | None = None
         self.mag_z: int | None = None
         self.last_mag_at: float | None = None
+        self.gps_fix: int | None = None
+        self.gps_satellites: int | None = None
+        self.gps_latitude_deg: float | None = None
+        self.gps_longitude_deg: float | None = None
+        self.gps_altitude_m: float | None = None
+        self.gps_speed_m_s: float | None = None
+        self.gps_course_deg: float | None = None
+        self.gps_hdop: float | None = None
+        self.last_gps_at: float | None = None
 
     def feed(self, data: bytes, received_at: float | None = None) -> list[SensorSample]:
         """Принимает байты и возвращает обновлённые согласованные образцы."""
@@ -138,6 +186,25 @@ class MspParser:
             # MSP_RAW_IMU: ACC X/Y/Z, GYRO X/Y/Z, MAG X/Y/Z, по int16.
             _, _, _, _, _, _, self.mag_x, self.mag_y, self.mag_z = struct.unpack_from("<hhhhhhhhh", payload)
             self.last_mag_at = now
+        elif command == MSP_RAW_GPS and len(payload) >= 16:
+            # MSP_RAW_GPS: fix, satellites, lat/lon 1e-7 deg, altitude m,
+            # speed cm/s и курс 0.1 deg. HDOP присутствует не во всех версиях.
+            (
+                self.gps_fix,
+                self.gps_satellites,
+                latitude,
+                longitude,
+                altitude_m,
+                speed_cm_s,
+                course_tenths,
+            ) = struct.unpack_from("<BBiihHH", payload)
+            self.gps_latitude_deg = latitude / 10_000_000.0
+            self.gps_longitude_deg = longitude / 10_000_000.0
+            self.gps_altitude_m = float(altitude_m)
+            self.gps_speed_m_s = speed_cm_s / 100.0
+            self.gps_course_deg = course_tenths / 10.0
+            self.gps_hdop = struct.unpack_from("<H", payload, 16)[0] / 100.0 if len(payload) >= 18 else None
+            self.last_gps_at = now
         else:
             return None
         return SensorSample(
@@ -155,18 +222,28 @@ class MspParser:
             mag_y=self.mag_y,
             mag_z=self.mag_z,
             mag_received_at=self.last_mag_at,
+            gps_fix=self.gps_fix,
+            gps_satellites=self.gps_satellites,
+            gps_latitude_deg=self.gps_latitude_deg,
+            gps_longitude_deg=self.gps_longitude_deg,
+            gps_altitude_m=self.gps_altitude_m,
+            gps_speed_m_s=self.gps_speed_m_s,
+            gps_course_deg=self.gps_course_deg,
+            gps_hdop=self.gps_hdop,
+            gps_received_at=self.last_gps_at,
         )
 
 
 class BetaflightMspLink:
     """Открывает отдельный UART и циклически запрашивает датчики Betaflight."""
 
-    def __init__(self, serial_port: str, baudrate: int, request_period_s: float = 0.05) -> None:
+    def __init__(self, serial_port: str, baudrate: int, request_period_s: float = 0.05, request_gps: bool = True) -> None:
         """Открывает MSP UART в режиме чтения и записи запросов."""
         if request_period_s <= 0:
             raise ValueError("Период MSP должен быть положительным")
         self.serial_port = serial_port
         self.request_period_s = request_period_s
+        self.request_gps = request_gps
         self._fd = os.open(serial_port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         self._configure_uart(self._fd, baudrate)
         settings = termios.tcgetattr(self._fd)
@@ -198,6 +275,8 @@ class BetaflightMspLink:
             os.write(self._fd, build_msp_request(MSP_ATTITUDE))
             os.write(self._fd, build_msp_request(MSP_ALTITUDE))
             os.write(self._fd, build_msp_request(MSP_RAW_IMU))
+            if self.request_gps:
+                os.write(self._fd, build_msp_request(MSP_RAW_GPS))
             self._next_request_at = current_time + self.request_period_s
         ready, _, _ = select.select([self._fd], [], [], 0)
         if not ready:

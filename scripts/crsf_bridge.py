@@ -143,6 +143,7 @@ def main() -> int:
                 str(msp_config["serial_port"]),
                 int(msp_config["baudrate"]),
                 int(msp_config["request_period_ms"]) / 1000.0,
+                request_gps=bool(msp_config.get("gps_enabled", False)),
             )
             if bool(failsafe_config.get("enabled", False)):
                 failsafe = FailsafeController(
@@ -243,12 +244,28 @@ def main() -> int:
                                     relative_text = f" relative_altitude={relative_altitude:.2f}m"
                             mag_text = ""
                             if sample.mag_x is not None and sample.mag_y is not None and sample.mag_z is not None:
-                                mag_text = f" mag=({sample.mag_x},{sample.mag_y},{sample.mag_z})"
+                                heading = sample.magnetic_heading_deg
+                                heading_text = "unknown" if heading is None else f"{heading:.1f}deg"
+                                mag_text = (
+                                    f" mag=({sample.mag_x},{sample.mag_y},{sample.mag_z})"
+                                    f" mag_heading_raw={heading_text}"
+                                )
+                            gps_text = " gps=NO_FIX"
+                            if sample.gps_fix is not None:
+                                gps_text = (
+                                    f" gps=fix{sample.gps_fix}/{sample.gps_satellites or 0}sat"
+                                    f" lat={sample.gps_latitude_deg:.7f} lon={sample.gps_longitude_deg:.7f}"
+                                    f" alt={sample.gps_altitude_m:.1f}m speed={sample.gps_speed_m_s:.2f}m/s"
+                                    f" course={sample.gps_course_deg:.1f}deg"
+                                    + (f" hdop={sample.gps_hdop:.2f}" if sample.gps_hdop is not None else "")
+                                    if sample.gps_latitude_deg is not None and sample.gps_longitude_deg is not None
+                                    else f" gps=fix{sample.gps_fix}/{sample.gps_satellites or 0}sat"
+                                )
                             journal.write(
                                 "FC",
                                 f"SENSOR: altitude={sample.altitude_m:.2f}m vario={sample.vario_m_s:.2f}m/s "
                                 f"roll={sample.roll_deg:.1f}deg pitch={sample.pitch_deg:.1f}deg yaw={sample.yaw_deg:.1f}deg"
-                                f"{relative_text}{mag_text}",
+                                f"{relative_text}{mag_text}{gps_text}",
                                 Color.MAGENTA,
                                 console=sensor_terminal,
                             )

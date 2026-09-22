@@ -29,6 +29,16 @@ DIRECT  →  CAPTURE  →  FOLLOW
 ./run.sh
 ```
 
+Локальная проверка привязки датчиков без Raspberry и без команд полётнику:
+
+```bash
+./run.sh sensor-test
+```
+
+Результат теста сохраняется в `runs/sensor_binding_test.log`, каталог не
+публикуется в Git. Этот тест проверяет программный MSP-контракт, а не реальные
+GPS, магнитометр или камеру.
+
 Режим failsafe выбирается в секции `[failsafe]` файла `config/dront16.toml`:
 
 ```toml

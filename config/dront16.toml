@@ -124,6 +124,29 @@ serial_port = "/dev/ttyAMA1"
 baudrate = 115200
 request_period_ms = 50
 sensor_max_age_ms = 250
+# Запрашивать GPS через тот же read-only MSP-канал после настройки GPS в FC.
+gps_enabled = true
+
+[sensors]
+# Единый контракт датчиков для диагностического запуска и будущего автомата.
+barometer = "FC/MSP_ALTITUDE"
+imu = "FC/MSP_ATTITUDE+MSP_RAW_IMU"
+magnetometer = "FC/MSP_RAW_IMU"
+compass = "FC/MSP_RAW_IMU_XY_DIAGNOSTIC"
+gps = "FC/MSP_RAW_GPS"
+front_camera = "RPI/front_camera"
+
+[sensor_test]
+# Локальный тест привязки не открывает UART, камеру и не отправляет команды FC.
+enabled = true
+# Файл локального журнала теста; каталог runs исключён из Git.
+log_file = "runs/sensor_binding_test.log"
+# Число синтетических циклов, достаточное для проверки объединения ответов MSP.
+cycles = 3
+# Период между синтетическими наборами показаний.
+period_ms = 100
+# Показывать в терминале только итоговые состояния, подробности остаются в логе.
+verbose = false
 
 [failsafe]
 # Только удержание высоты, стабилизация и разворот. Посадки нет.
