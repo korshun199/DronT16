@@ -68,7 +68,7 @@ def load_osd_config(path: str | Path) -> OsdConfig:
             mode: parse_color(colors[name])
             for mode, name in {
                 Mode.IDLE: "idle", Mode.CAPTURE: "capture",
-                Mode.TRACKING: "tracking", Mode.LOST: "lost",
+                Mode.TRACKING: "tracking", Mode.CONTROL: "control", Mode.LOST: "lost",
                 Mode.DISABLED: "disabled", Mode.RETURN: "return",
             }.items()
         }

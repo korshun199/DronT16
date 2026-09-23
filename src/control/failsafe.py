@@ -1,4 +1,4 @@
-"""Управляемый режим сохранения полёта после потери связи по CH7.
+"""Управляемое удержание FC после CH7 или верхнего положения CH6.
 
 RPI передаёт в Betaflight только RC/setpoint-кадры. PWM моторов, PID и
 внутренняя стабилизация остаются внутри FC.
@@ -60,6 +60,9 @@ class FailsafeConfig:
     climb_guard_altitude_error_m: float = 0.20
     climb_guard_vario_m_s: float = 0.50
     climb_guard_max_throttle: int = 850
+    target_yaw_deadband_deg: float = 2.0
+    target_yaw_correction_per_degree: float = 18.0
+    target_yaw_max_correction: int = 250
 
 
 @dataclass(frozen=True)
@@ -77,7 +80,7 @@ class FailsafeResult:
 
 
 class FailsafeController:
-    """Удерживает высоту и горизонт, затем выполняет разворот и ждёт CH7."""
+    """Удерживает высоту/горизонт, а в TARGET_CONTROL дополнительно ведёт yaw."""
 
     def __init__(self, config: FailsafeConfig) -> None:
         """Создаёт контроллер в обычном режиме LIVE."""
@@ -108,6 +111,8 @@ class FailsafeController:
         sensor: SensorSample | None,
         now: float,
         armed: bool = True,
+        target_mode: bool = False,
+        target_yaw_error_deg: float | None = None,
     ) -> FailsafeResult:
         """Удерживает аппарат после CH7 или возвращает исходный кадр в LIVE."""
         cfg = self.config
@@ -199,7 +204,10 @@ class FailsafeController:
                 self.level_stable_since = None
             stable = self.level_stable_since is not None and now - self.level_stable_since >= cfg.level_hold_s
             if stable:
-                if cfg.turn_enabled and not self.turn_completed:
+                if target_mode:
+                    self.state = FailsafeState.HOLDING
+                    events.append("LEVELING -> HOLDING: цель ведёт yaw")
+                elif cfg.turn_enabled and not self.turn_completed:
                     if current_sensor.yaw_deg is None:
                         self.state = FailsafeState.FAULT
                         self.fault_frame = frame
@@ -220,6 +228,10 @@ class FailsafeController:
 
         if self.state in (FailsafeState.LEVELING, FailsafeState.TURNING, FailsafeState.HOLDING):
             self._set_hold_throttle(output_channels, current_sensor, now, events)
+            # Сначала выравниваем аппарат; наведение носа начинается только
+            # после подтверждённого горизонта.
+            if target_mode and self.state is FailsafeState.HOLDING:
+                output_channels[cfg.yaw_channel] = self._target_yaw_command(target_yaw_error_deg)
         return self._result(rebuild_rc_frame(frame, output_channels), output_channels, events, self.state)
 
     def _reset_runtime(self, clear_arm_reference: bool) -> None:
@@ -305,6 +317,14 @@ class FailsafeController:
             and abs(sensor.roll_deg - self.config.target_roll_deg) <= self.config.level_roll_tolerance_deg
             and abs(sensor.pitch_deg - self.config.target_pitch_deg) <= self.config.level_pitch_tolerance_deg
         )
+
+    def _target_yaw_command(self, error_deg: float | None) -> int:
+        """Преобразует горизонтальную ошибку цели в ограниченную команду yaw."""
+        if error_deg is None or abs(error_deg) <= self.config.target_yaw_deadband_deg:
+            return self.config.rc_center
+        correction = round(error_deg * self.config.target_yaw_correction_per_degree)
+        correction = max(-self.config.target_yaw_max_correction, min(self.config.target_yaw_max_correction, correction))
+        return max(self.config.rc_min, min(self.config.rc_max, self.config.rc_center + correction))
 
     def relative_altitude(self, sensor: SensorSample | None) -> float | None:
         """Возвращает высоту относительно точки первого ARM для журнала."""

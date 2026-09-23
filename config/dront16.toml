@@ -38,9 +38,10 @@ capture_box_offset_y = 12
 
 [osd.colors]
 # Цвета режимов задаются в формате #RRGGBB.
-idle = "#f6efe8"
+idle = "#ffffff"
 capture = "#e3c70b"
 tracking = "#ff0000"
+control = "#ff00ff"
 lost = "#dc14ff"
 disabled = "#ff0000"
 return = "#ff8c00"
@@ -89,6 +90,27 @@ max_bad_frames = 16
 adaptation_rate = 0.05
 foreground_margin_percent = 15.0
 
+[follow.control]
+# Управление FC по цели отключено для текущего диагностического теста.
+enabled = false
+# Файл связи видеотрекера и CRSF-моста; создаётся атомарно и не содержит секретов.
+target_state_file = "/tmp/dront16_target.json"
+# Максимальный возраст координат цели для управления yaw.
+target_max_age_ms = 300
+
+[follow.range]
+# Горизонтальный допуск относительно центра кадра, в процентах ширины полукадра.
+horizontal_deadband_percent = 5.0
+# Минимальное относительное изменение размера рамки для вывода приближения/удаления.
+size_change_deadband_percent = 1.0
+# Сглаживание размера рамки: 1.0 — без сглаживания.
+smoothing_alpha = 0.25
+# Порог площади рамки: при достижении выводится «ОБЪЕКТ ПОД КОНТРОЛЕМ!».
+# Это отдельный статус; показатель «ДО ОБЪЕКТА» считается от размера захвата.
+control_threshold_percent = 50.0
+# Период вывода тестовых строк в консоль.
+report_period_ms = 250
+
 [receiver]
 # Рабочий CRSF-вход от приёмника на Raspberry pin 10 / GPIO15.
 serial_port = "/dev/ttyAMA0"
@@ -96,6 +118,8 @@ baudrate = 420000
 link_timeout_ms = 300
 mode_channel = 6
 report_period_ms = 250
+# Общий флаг ARM для терминального диагностического вывода видеомодуля.
+arm_state_file = "/tmp/dront16_arm_state"
 
 [receiver.mode]
 # Пороги режимов AUX-канала видеосистемы.
@@ -110,6 +134,10 @@ forward_link_statistics = true
 report_period_ms = 500
 verbose_frames = false
 sensor_terminal = false
+# Записывать каждый корректный ответ MSP в файл во время ARM-сессии.
+sensor_log_every_packet = true
+# Если полный режим отключён, сохранять объединённый снимок с этим периодом.
+sensor_log_period_ms = 100
 control_file = "/tmp/dront16_command"
 simulator_control_file = "/tmp/simulator_filesafe_command"
 log_file = "simulator_filesafe.log"
@@ -184,6 +212,10 @@ takeover_throttle_step_per_s = 50.0
 climb_guard_altitude_error_m = 0.20
 climb_guard_vario_m_s = 0.50
 climb_guard_max_throttle = 850
+# Мёртвая зона и усиление наведения носа на захваченную цель по горизонтали.
+target_yaw_deadband_deg = 2.0
+target_yaw_correction_per_degree = 18.0
+target_yaw_max_correction = 250
 
 [simulation]
 # Старый автономный симулятор запускается только отдельным явным тестом.
@@ -227,8 +259,18 @@ throttle_ramp_s = 5.0
 command_file = "/tmp/simulator_filesafe_command"
 
 [logging]
-# Рабочий журнал начинается с ARM и завершается после DISARM.
+# Файловый журнал начинается с ARM и завершается после DISARM.
 file = "simulator_filesafe.log"
+# Включает или отключает независимый канал терминала.
+console_enabled = true
+# Включает или отключает независимый файловый канал.
+file_enabled = true
+# В диагностическом тесте мост не печатает служебные категории в терминал.
+console_categories = []
+# Полный набор категорий для последующего разбора.
+# Для текущего теста в файл пишутся только фактические показания FC/MSP.
+file_categories = ["FC"]
+# Старый флаг оставлен для подробного вывода датчиков в консоль при ручном включении.
 sensor_terminal = false
 
 [runtime]

@@ -2,6 +2,8 @@
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from contextlib import redirect_stdout
+from io import StringIO
 import unittest
 
 from src.diagnostics.journal import EventJournal
@@ -29,3 +31,49 @@ class EventJournalTest(unittest.TestCase):
         self.assertIn("sensor", contents)
         self.assertNotIn("before arm", contents)
         self.assertNotIn("after disarm", contents)
+
+    def test_console_and_file_channels_are_independent(self) -> None:
+        """Консоль и файл получают только назначенные им категории."""
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "channels.log"
+            output = StringIO()
+            with redirect_stdout(output):
+                journal = EventJournal(
+                    path,
+                    "TEST",
+                    console_categories={"RPI"},
+                    file_categories={"RPI", "FC"},
+                )
+                journal.begin_session()
+                journal.write("PILOT", "pilot hidden")
+                journal.write("RPI", "rpi visible")
+                journal.write("FC", "fc file only")
+                journal.close()
+
+            console = output.getvalue()
+            contents = path.read_text(encoding="utf-8")
+
+        self.assertIn("rpi visible", console)
+        self.assertNotIn("pilot hidden", console)
+        self.assertNotIn("fc file only", console)
+        self.assertIn("rpi visible", contents)
+        self.assertIn("fc file only", contents)
+        self.assertNotIn("pilot hidden", contents)
+
+    def test_fault_closes_active_session(self) -> None:
+        """После сбоя текущая ARM-сессия закрывается и новые строки не пишутся."""
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fault.log"
+            journal = EventJournal(path, "TEST")
+            journal.begin_session()
+            journal.write("RPI", "before fault", console=False)
+            journal.write("RPI", "SESSION END: FAULT", console=False)
+            journal.end_session()
+            journal.write("RPI", "after fault", console=False)
+            journal.close()
+
+            contents = path.read_text(encoding="utf-8")
+
+        self.assertIn("before fault", contents)
+        self.assertIn("SESSION END: FAULT", contents)
+        self.assertNotIn("after fault", contents)

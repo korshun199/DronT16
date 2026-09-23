@@ -15,6 +15,7 @@ if str(PROJECT_DIR) not in sys.path:
 from src.diagnostics.journal import Color, EventJournal
 from src.configuration import load_config_section
 from src.control.failsafe import FailsafeConfig, FailsafeController
+from src.control.target_control import TargetGuidance, read_target_guidance
 from src.receiver.crsf import (
     CRSF_LINK_STATISTICS,
     CRSF_RC_CHANNELS_PACKED,
@@ -24,7 +25,7 @@ from src.receiver.crsf import (
 )
 from src.receiver.mode import ModeThresholds, ReceiverModeDecoder
 from src.receiver.takeover import TakeoverConfig, TakeoverController, TakeoverState
-from src.protocols.betaflight_msp_link import BetaflightMspLink, SensorSample
+from src.protocols.betaflight_msp_link import BetaflightMspLink, SensorSample, msp_command_name
 
 
 def load_config() -> dict[str, int | str]:
@@ -43,11 +44,32 @@ def load_bridge_sections() -> tuple[dict[str, object], dict[str, object]]:
     return load_config_section(config_path, "msp"), load_config_section(config_path, "failsafe")
 
 
+def load_target_control_config() -> dict[str, object]:
+    """Загружает общий файл координат захваченной цели."""
+    return load_config_section(PROJECT_DIR / "config/dront16.toml", "follow", "control")
+
+
+def load_logging_config() -> dict[str, object]:
+    """Загружает независимые настройки консольного и файлового каналов."""
+    return load_config_section(PROJECT_DIR / "config/dront16.toml", "logging")
+
+
+def category_set(value: object) -> set[str] | None:
+    """Проверяет список категорий журнала и приводит его к верхнему регистру."""
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError("Категории журнала должны быть TOML-массивом строк")
+    return {item.upper() for item in value}
+
+
 def main() -> int:
     """Передаёт RC, повторяет последний кадр при CH7 и даёт приоритет DISARM."""
     config = load_config()
     control = load_takeover_config()
     msp_config, failsafe_config = load_bridge_sections()
+    target_config = load_target_control_config()
+    logging_config = load_logging_config()
     receiver_config = load_config_section(PROJECT_DIR / "config/dront16.toml", "receiver")
     mode_config = load_config_section(PROJECT_DIR / "config/dront16.toml", "receiver", "mode")
     failsafe_mode = str(failsafe_config.get("mode", "CH7")).upper()
@@ -61,12 +83,20 @@ def main() -> int:
     report_period_s = int(config["report_period_ms"]) / 1000.0
     verbose_frames = bool(config.get("verbose_frames", False))
     sensor_terminal = bool(config.get("sensor_terminal", False))
+    # При полном диагностическом режиме каждый корректный MSP-ответ попадает в файл.
+    sensor_log_every_packet = bool(config.get("sensor_log_every_packet", True))
+    sensor_log_period_s = int(config.get("sensor_log_period_ms", 100)) / 1000.0
     pilot_log_period_s = int(config.get("pilot_log_period_ms", 500)) / 1000.0
     command_log_period_s = int(config.get("command_log_period_ms", 100)) / 1000.0
     rc_gap_log_ms = int(config.get("rc_gap_log_ms", 100))
     command_file = Path(str(config.get("control_file", "/tmp/dront16_command")))
     simulator_command_file = Path(str(config.get("simulator_control_file", "/tmp/simulator_filesafe_command")))
+    target_state_file = Path(str(target_config.get("target_state_file", "/tmp/dront16_target.json")))
+    target_max_age_s = int(target_config.get("target_max_age_ms", 300)) / 1000.0
+    arm_state_file = Path(str(receiver_config.get("arm_state_file", "/tmp/dront16_arm_state")))
     log_file = PROJECT_DIR / str(config.get("log_file", "simulator_filesafe.log"))
+    console_categories = category_set(logging_config.get("console_categories"))
+    file_categories = category_set(logging_config.get("file_categories"))
 
     mode_channel = int(receiver_config["mode_channel"]) - 1
     mode_decoder = ReceiverModeDecoder(
@@ -98,6 +128,8 @@ def main() -> int:
         or pilot_log_period_s <= 0
         or command_log_period_s <= 0
         or rc_gap_log_ms <= 0
+        or sensor_log_period_s <= 0
+        or target_max_age_s <= 0
     ):
         raise ValueError("Неверные параметры каналов simulator_filesafe")
     takeover = TakeoverController(
@@ -126,7 +158,14 @@ def main() -> int:
     frozen_frames = 0
     link_statistics_forwarded = 0
     last_link_statistics_log = 0.0
-    journal = EventJournal(log_file, "BRIDGE")
+    journal = EventJournal(
+        log_file,
+        "BRIDGE",
+        console_enabled=bool(logging_config.get("console_enabled", True)),
+        file_enabled=bool(logging_config.get("file_enabled", True)),
+        console_categories=console_categories,
+        file_categories=file_categories,
+    )
     msp_link: BetaflightMspLink | None = None
     failsafe: FailsafeController | None = None
     latest_sensor: SensorSample | None = None
@@ -136,6 +175,12 @@ def main() -> int:
     last_pilot_log = 0.0
     last_pilot_action_values: tuple[int, ...] | None = None
     last_rc_interval_ms: float | None = None
+
+    # До первого свежего кадра считаем терминальный диагностический вывод неактивным.
+    try:
+        arm_state_file.write_text("DISARM", encoding="ascii")
+    except OSError as error:
+        journal.write("RPI", f"ARM STATE WARNING: {error}", Color.YELLOW, file=False)
 
     try:
         if bool(msp_config.get("enabled", False)):
@@ -185,6 +230,9 @@ def main() -> int:
                         climb_guard_altitude_error_m=float(failsafe_config["climb_guard_altitude_error_m"]),
                         climb_guard_vario_m_s=float(failsafe_config["climb_guard_vario_m_s"]),
                         climb_guard_max_throttle=int(failsafe_config["climb_guard_max_throttle"]),
+                        target_yaw_deadband_deg=float(failsafe_config["target_yaw_deadband_deg"]),
+                        target_yaw_correction_per_degree=float(failsafe_config["target_yaw_correction_per_degree"]),
+                        target_yaw_max_correction=int(failsafe_config["target_yaw_max_correction"]),
                     )
                 )
     except (OSError, ValueError, KeyError, TypeError) as error:
@@ -214,6 +262,60 @@ def main() -> int:
         """Формирует единый полный снимок 16 RC-каналов для журнала."""
         return " ".join(f"CH{index + 1}={value}" for index, value in enumerate(channels))
 
+    def format_sensor_sample(sample: SensorSample, relative_text: str) -> str:
+        """Формирует полную строку всех полей, доступных из текущего MSP-парсера."""
+        command_name = msp_command_name(sample.updated_command)
+        altitude = "NA" if sample.altitude_m is None else f"{sample.altitude_m:.3f}m"
+        vario = "NA" if sample.vario_m_s is None else f"{sample.vario_m_s:.3f}m/s"
+        attitude = " ".join(
+            f"{name}={'NA' if value is None else f'{value:.3f}deg'}"
+            for name, value in (
+                ("roll", sample.roll_deg),
+                ("pitch", sample.pitch_deg),
+                ("yaw", sample.yaw_deg),
+            )
+        )
+        acc = " ".join(
+            f"{name}={'NA' if value is None else value}"
+            for name, value in (
+                ("acc_x", sample.acc_x),
+                ("acc_y", sample.acc_y),
+                ("acc_z", sample.acc_z),
+            )
+        )
+        gyro = " ".join(
+            f"{name}={'NA' if value is None else value}"
+            for name, value in (
+                ("gyro_x", sample.gyro_x),
+                ("gyro_y", sample.gyro_y),
+                ("gyro_z", sample.gyro_z),
+            )
+        )
+        mag = " ".join(
+            f"{name}={'NA' if value is None else value}"
+            for name, value in (
+                ("mag_x", sample.mag_x),
+                ("mag_y", sample.mag_y),
+                ("mag_z", sample.mag_z),
+            )
+        )
+        heading = "NA" if sample.magnetic_heading_deg is None else f"{sample.magnetic_heading_deg:.3f}deg"
+        gps = (
+            f"gps_fix={sample.gps_fix if sample.gps_fix is not None else 'NA'} "
+            f"gps_sat={sample.gps_satellites if sample.gps_satellites is not None else 'NA'} "
+            f"gps_lat={sample.gps_latitude_deg if sample.gps_latitude_deg is not None else 'NA'} "
+            f"gps_lon={sample.gps_longitude_deg if sample.gps_longitude_deg is not None else 'NA'} "
+            f"gps_alt={sample.gps_altitude_m if sample.gps_altitude_m is not None else 'NA'}m "
+            f"gps_speed={sample.gps_speed_m_s if sample.gps_speed_m_s is not None else 'NA'}m/s "
+            f"gps_course={sample.gps_course_deg if sample.gps_course_deg is not None else 'NA'}deg "
+            f"gps_hdop={sample.gps_hdop if sample.gps_hdop is not None else 'NA'}"
+        )
+        return (
+            f"MSP packet={command_name} complete={sample.complete} "
+            f"altitude={altitude} vario={vario} {attitude} {acc} {gyro} {mag} "
+            f"mag_heading_raw={heading} {gps}{relative_text}"
+        )
+
     journal.write("RPI", f"START: UART={serial_port} baud={baudrate}; управляемый мост активен", Color.CYAN)
     journal.write(
         "RPI",
@@ -236,36 +338,18 @@ def main() -> int:
                     for sample in msp_link.poll():
                         latest_sensor = sample
                         now_sensor = time.monotonic()
-                        if now_sensor - last_sensor_log >= 0.1 and sample.complete:
+                        if (
+                            sensor_log_every_packet
+                            or now_sensor - last_sensor_log >= sensor_log_period_s
+                        ):
                             relative_text = ""
                             if failsafe is not None:
                                 relative_altitude = failsafe.relative_altitude(sample)
                                 if relative_altitude is not None:
                                     relative_text = f" relative_altitude={relative_altitude:.2f}m"
-                            mag_text = ""
-                            if sample.mag_x is not None and sample.mag_y is not None and sample.mag_z is not None:
-                                heading = sample.magnetic_heading_deg
-                                heading_text = "unknown" if heading is None else f"{heading:.1f}deg"
-                                mag_text = (
-                                    f" mag=({sample.mag_x},{sample.mag_y},{sample.mag_z})"
-                                    f" mag_heading_raw={heading_text}"
-                                )
-                            gps_text = " gps=NO_FIX"
-                            if sample.gps_fix is not None:
-                                gps_text = (
-                                    f" gps=fix{sample.gps_fix}/{sample.gps_satellites or 0}sat"
-                                    f" lat={sample.gps_latitude_deg:.7f} lon={sample.gps_longitude_deg:.7f}"
-                                    f" alt={sample.gps_altitude_m:.1f}m speed={sample.gps_speed_m_s:.2f}m/s"
-                                    f" course={sample.gps_course_deg:.1f}deg"
-                                    + (f" hdop={sample.gps_hdop:.2f}" if sample.gps_hdop is not None else "")
-                                    if sample.gps_latitude_deg is not None and sample.gps_longitude_deg is not None
-                                    else f" gps=fix{sample.gps_fix}/{sample.gps_satellites or 0}sat"
-                                )
                             journal.write(
                                 "FC",
-                                f"SENSOR: altitude={sample.altitude_m:.2f}m vario={sample.vario_m_s:.2f}m/s "
-                                f"roll={sample.roll_deg:.1f}deg pitch={sample.pitch_deg:.1f}deg yaw={sample.yaw_deg:.1f}deg"
-                                f"{relative_text}{mag_text}{gps_text}",
+                                format_sensor_sample(sample, relative_text),
                                 Color.MAGENTA,
                                 console=sensor_terminal,
                             )
@@ -331,6 +415,17 @@ def main() -> int:
                         last_pilot_log = now
                     previous_state = takeover.state
                     selected_mode, changed = mode_decoder.update(channels[mode_channel])
+                    target_mode_active = (
+                        bool(target_config.get("enabled", False))
+                        and selected_mode.value == "FOLLOW"
+                    )
+                    target_guidance: TargetGuidance | None = (
+                        read_target_guidance(target_state_file) if target_mode_active else None
+                    )
+                    target_guidance_fresh = (
+                        target_guidance is not None
+                        and target_guidance.is_fresh(now, target_max_age_s)
+                    )
                     if changed:
                         mode_command = {"DIRECT": "1", "CAPTURE": "2", "FOLLOW": "3"}[selected_mode.value]
                         command_file.write_text(mode_command, encoding="ascii")
@@ -339,6 +434,12 @@ def main() -> int:
                             f"MODE: CH{mode_channel + 1}={channels[mode_channel]} -> {mode_command} {selected_mode.value}",
                             Color.CYAN,
                         )
+                        if target_mode_active:
+                            journal.write(
+                                "RPI",
+                                "TARGET_CONTROL: RPI принимает управление; цель используется только для yaw",
+                                Color.YELLOW,
+                            )
 
                     # В REAL CH7 игнорируется: takeover начинается только по тайм-ауту входных кадров.
                     result = takeover.process(
@@ -360,6 +461,10 @@ def main() -> int:
                         if not result.disarmed:
                             # Новый файл испытания начинается с первого ARM.
                             journal.begin_session()
+                            try:
+                                arm_state_file.write_text("ARM", encoding="ascii")
+                            except OSError as error:
+                                journal.write("RPI", f"ARM STATE WARNING: {error}", Color.YELLOW, file=False)
                         journal.write(
                             "PILOT",
                             f"ARM SWITCH: CH{disarm_channel + 1}={channels[disarm_channel]} -> "
@@ -368,6 +473,10 @@ def main() -> int:
                         )
                         if result.disarmed:
                             close_journal_after_frame = True
+                            try:
+                                arm_state_file.write_text("DISARM", encoding="ascii")
+                            except OSError as error:
+                                journal.write("RPI", f"ARM STATE WARNING: {error}", Color.YELLOW, file=False)
                         last_disarmed = result.disarmed
 
                     if previous_state is TakeoverState.LIVE and result.state is TakeoverState.TAKEOVER:
@@ -395,6 +504,13 @@ def main() -> int:
                             armed=False,
                         )
                     if failsafe is not None and result.output_kind != "DISARM":
+                        target_takeover = target_mode_active and result.state is TakeoverState.LIVE
+                        if target_takeover and not target_guidance_fresh:
+                            journal.write(
+                                "RPI",
+                                "TARGET_CONTROL: цель отсутствует или устарела; yaw удерживается по центру",
+                                Color.YELLOW,
+                            )
                         failsafe_result = failsafe.process(
                             output_frame,
                             unpack_channels(output_frame[3:-1]),
@@ -402,11 +518,20 @@ def main() -> int:
                             latest_sensor,
                             now,
                             armed=not result.disarmed,
+                            target_mode=target_takeover,
+                            target_yaw_error_deg=(
+                                target_guidance.yaw_error_deg if target_guidance_fresh and target_guidance else None
+                            ),
                         )
                         for event in failsafe_result.events:
                             event_kind = "SAFETY" if "FAULT" in event else "DECISION"
                             color = Color.RED if event_kind == "SAFETY" else Color.YELLOW
                             journal.write("RPI", f"{event_kind}: {event}", color)
+                        if failsafe_result.state.value == "FAULT":
+                            # Сбой закрывает текущую ARM-сессию; новые данные
+                            # не смешиваются с этим испытательным циклом.
+                            journal.write("RPI", "SESSION END: FAULT", Color.RED)
+                            journal.end_session()
                         output_frame = failsafe_result.output_frame
                         if failsafe_result.state.value != "LIVE" and (
                             failsafe_result.events
@@ -512,9 +637,11 @@ def main() -> int:
                     last_report = now
     except KeyboardInterrupt:
         journal.write("RPI", "STOP: мост остановлен оператором", Color.YELLOW)
+        journal.end_session()
         return 0
     except (OSError, ValueError, KeyError, RuntimeError) as error:
         journal.write("RPI", f"ERROR: {error}", Color.RED)
+        journal.end_session()
         return 1
     finally:
         if msp_link is not None:

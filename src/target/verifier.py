@@ -25,6 +25,8 @@ class TargetVerifier:
         self._template: Any = None
         self._histogram: Any = None
         self._bad_frames = 0
+        # Полный кадр в момент захвата нужен для оценки заполнения вне рамки.
+        self._reference_frame: Any = None
 
     @staticmethod
     def _crop(frame: Any, target: TargetBox) -> Any | None:
@@ -43,6 +45,7 @@ class TargetVerifier:
         crop = self._crop(frame, target)
         if crop is None or crop.size == 0:
             raise ValueError("Нельзя сохранить пустой образец цели")
+        self._reference_frame = frame.copy()
         sample = self._foreground_crop(crop)
         self._template = cv2.resize(sample, (64, 64), interpolation=cv2.INTER_AREA)
         hsv = cv2.cvtColor(sample, cv2.COLOR_BGR2HSV)
@@ -59,6 +62,15 @@ class TargetVerifier:
         """Выделяет вероятную переднюю область и подавляет внешний фон."""
         if self.method != "foreground":
             return crop
+        foreground = self._foreground_mask(crop)
+        if foreground is None:
+            return crop
+        result = crop.copy()
+        result[~foreground] = 0
+        return result
+
+    def _foreground_mask(self, crop: Any) -> Any | None:
+        """Возвращает маску объекта в рамке или None при неудаче выделения."""
         height, width = crop.shape[:2]
         margin_x = int(width * self.foreground_margin_percent / 100.0)
         margin_y = int(height * self.foreground_margin_percent / 100.0)
@@ -80,12 +92,45 @@ class TargetVerifier:
                         2, cv2.GC_INIT_WITH_MASK)
             foreground = (mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD)
             if int(foreground.sum()) >= max(16, crop.shape[0] * crop.shape[1] // 20):
-                result = crop.copy()
-                result[~foreground] = 0
-                return result
+                return foreground
         except cv2.error:
-            pass
-        return crop
+            return None
+        return None
+
+    def object_area_percent(self, frame: Any, target: TargetBox) -> float | None:
+        """Считает площадь маски объекта относительно всего кадра."""
+        crop = self._crop(frame, target)
+        if crop is None or crop.size == 0:
+            return None
+        foreground = self._foreground_mask(crop)
+        if foreground is None:
+            return None
+        frame_area = float(frame.shape[0] * frame.shape[1])
+        return float(foreground.sum()) / frame_area * 100.0
+
+    def frame_fill_percent(self, frame: Any, target: TargetBox) -> float | None:
+        """Оценивает заполнение кадра объектом и изменившейся областью."""
+        object_percent = self.object_area_percent(frame, target)
+        changed_percent = self._changed_area_percent(frame)
+        if object_percent is None and self._reference_frame is None:
+            return None
+        # Изменение полного кадра используется только для отдельного порога
+        # контроля, но не участвует в знаковом размере объекта.
+        return max(object_percent or 0.0, changed_percent)
+
+    def _changed_area_percent(self, frame: Any) -> float:
+        """Оценивает долю кадра, изменившуюся после захвата цели."""
+        if self._reference_frame is None or self._reference_frame.shape != frame.shape:
+            return 0.0
+        reference_gray = cv2.cvtColor(self._reference_frame, cv2.COLOR_BGR2GRAY)
+        current_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        difference = cv2.absdiff(current_gray, reference_gray)
+        # 25 уровней подавляют шум EasyCap и небольшие изменения яркости.
+        changed = (difference >= 25).astype("uint8") * 255
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        changed = cv2.morphologyEx(changed, cv2.MORPH_OPEN, kernel)
+        changed = cv2.morphologyEx(changed, cv2.MORPH_CLOSE, kernel)
+        return float(cv2.countNonZero(changed)) / (frame.shape[0] * frame.shape[1]) * 100.0
 
     def verify(self, frame: Any, target: TargetBox) -> bool:
         """Проверяет цветовую и визуальную близость найденной области."""
@@ -129,3 +174,4 @@ class TargetVerifier:
         self._template = None
         self._histogram = None
         self._bad_frames = 0
+        self._reference_frame = None

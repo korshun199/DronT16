@@ -22,7 +22,7 @@ class SensorBindingTests(unittest.TestCase):
     def test_parser_reads_gps_and_magnetometer_from_split_stream(self) -> None:
         """GPS и магнитометр собираются даже при дроблении UART-потока."""
         parser = MspParser()
-        raw_imu = struct.pack("<hhhhhhhhh", 0, 0, 1000, 0, 0, 0, 0, 1000, -1200)
+        raw_imu = struct.pack("<hhhhhhhhh", 11, -22, 1000, 31, -41, 51, 0, 1000, -1200)
         raw_gps = struct.pack("<BBiihHHH", 3, 10, 557_522_000, 376_156_000, 180, 125, 900, 120)
         stream = response(MSP_RAW_IMU, raw_imu) + response(MSP_RAW_GPS, raw_gps)
         samples = []
@@ -37,6 +37,8 @@ class SensorBindingTests(unittest.TestCase):
         self.assertAlmostEqual(sample.gps_speed_m_s or 0.0, 1.25)
         self.assertAlmostEqual(sample.gps_course_deg or 0.0, 90.0)
         self.assertAlmostEqual(sample.magnetic_heading_deg or 0.0, 90.0)
+        self.assertEqual((sample.acc_x, sample.acc_y, sample.acc_z), (11, -22, 1000))
+        self.assertEqual((sample.gyro_x, sample.gyro_y, sample.gyro_z), (31, -41, 51))
         self.assertFalse(sample.gps_is_fresh(4.3, 0.25))
 
     def test_gps_without_fix_is_not_valid(self) -> None:

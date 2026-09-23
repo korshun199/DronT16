@@ -60,6 +60,26 @@ class TrackerConfig:
 
 
 @dataclass(frozen=True)
+class TargetControlConfig:
+    """Общий файл направления цели между видео и CRSF-мостом."""
+
+    enabled: bool
+    state_file: str
+    max_age_ms: int
+
+
+@dataclass(frozen=True)
+class RangeConfig:
+    """Настройки тестового определения смещения и относительной дальности."""
+
+    horizontal_deadband_percent: float
+    size_change_deadband_percent: float
+    smoothing_alpha: float
+    control_threshold_percent: float
+    report_period_ms: int
+
+
+@dataclass(frozen=True)
 class FollowConfig:
     """Полная конфигурация сопровождения."""
 
@@ -68,6 +88,8 @@ class FollowConfig:
     msp: MspConfig
     verification: VerificationConfig
     tracker: TrackerConfig
+    control: TargetControlConfig
+    range: RangeConfig
 
 
 def _number(section: dict[str, Any], name: str) -> float:
@@ -122,6 +144,18 @@ def load_follow_config(path: str | Path) -> FollowConfig:
                 float(verification.get("foreground_margin_percent", 15.0)),
             ),
             TrackerConfig(str(raw.get("tracker", {}).get("algorithm", "csrt"))),
+            TargetControlConfig(
+                bool(raw.get("control", {}).get("enabled", False)),
+                str(raw.get("control", {}).get("target_state_file", "/tmp/dront16_target.json")),
+                int(raw.get("control", {}).get("target_max_age_ms", 300)),
+            ),
+            RangeConfig(
+                float(raw.get("range", {}).get("horizontal_deadband_percent", 5.0)),
+                float(raw.get("range", {}).get("size_change_deadband_percent", 1.0)),
+                float(raw.get("range", {}).get("smoothing_alpha", 0.25)),
+                float(raw.get("range", {}).get("control_threshold_percent", 50.0)),
+                int(raw.get("range", {}).get("report_period_ms", 250)),
+            ),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(f"Ошибка параметров конфигурации {config_path}: {error}") from error
@@ -143,4 +177,14 @@ def load_follow_config(path: str | Path) -> FollowConfig:
         raise ValueError("foreground_margin_percent должен быть от 0 до 50")
     if result.tracker.algorithm not in {"csrt", "kcf", "mil"}:
         raise ValueError("algorithm должен быть csrt, kcf или mil")
+    if result.control.max_age_ms <= 0:
+        raise ValueError("target_max_age_ms должен быть положительным")
+    if result.range.horizontal_deadband_percent < 0 or result.range.size_change_deadband_percent < 0:
+        raise ValueError("Пороги range не могут быть отрицательными")
+    if not 0 < result.range.smoothing_alpha <= 1:
+        raise ValueError("smoothing_alpha должен быть больше 0 и не больше 1")
+    if not 0 < result.range.control_threshold_percent <= 100:
+        raise ValueError("control_threshold_percent должен быть от 0 до 100")
+    if result.range.report_period_ms <= 0:
+        raise ValueError("range.report_period_ms должен быть положительным")
     return result

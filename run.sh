@@ -35,7 +35,7 @@ main() {
     ensure_environment
     cd "${PROJECT_DIR}"
     # Не открываем вторую копию камеры, если проект уже запущен systemd или
-    # другим экземпляром run.
+    # другим экземпляром run.sh.
     if [[ "$#" -eq 1 && "$1" == "sensor-test" ]]; then
         log "Запуск локального теста привязки датчиков; реальные порты отключены"
         exec "${PYTHON_BIN}" "${PROJECT_DIR}/scripts/sensor_binding_test.py"
@@ -85,7 +85,7 @@ main() {
         fi
     fi
     cleanup() {
-        # Останавливаем только мост, запущенный этим экземпляром run.
+        # Останавливаем только мост, запущенный этим экземпляром run.sh.
         if [[ -n "${bridge_pid:-}" ]] && kill -0 "${bridge_pid}" 2>/dev/null; then
             kill "${bridge_pid}" 2>/dev/null || true
         fi

@@ -22,6 +22,21 @@ MSP_ALTITUDE = 109
 MSP_RAW_IMU = 102
 MSP_RAW_GPS = 106
 
+# Допустимые команды MSP для подписывания записей диагностического журнала.
+MSP_COMMAND_NAMES = {
+    MSP_ATTITUDE: "ATTITUDE",
+    MSP_ALTITUDE: "ALTITUDE",
+    MSP_RAW_IMU: "RAW_IMU",
+    MSP_RAW_GPS: "RAW_GPS",
+}
+
+
+def msp_command_name(command: int | None) -> str:
+    """Возвращает понятное имя MSP-команды или её числовое обозначение."""
+    if command is None:
+        return "UNKNOWN"
+    return MSP_COMMAND_NAMES.get(command, f"MSP_{command}")
+
 
 def msp_checksum(size: int, command: int, payload: bytes = b"") -> int:
     """Считает XOR-контрольную сумму MSP v1."""
@@ -67,6 +82,16 @@ class SensorSample:
     gps_course_deg: float | None = None
     gps_hdop: float | None = None
     gps_received_at: float | None = None
+    # Сырые показания акселерометра и гироскопа из MSP_RAW_IMU.
+    acc_x: int | None = None
+    acc_y: int | None = None
+    acc_z: int | None = None
+    gyro_x: int | None = None
+    gyro_y: int | None = None
+    gyro_z: int | None = None
+    raw_imu_received_at: float | None = None
+    # MSP-команда, после которой сформирован этот образец.
+    updated_command: int | None = None
 
     @property
     def complete(self) -> bool:
@@ -138,6 +163,13 @@ class MspParser:
         self.gps_course_deg: float | None = None
         self.gps_hdop: float | None = None
         self.last_gps_at: float | None = None
+        self.acc_x: int | None = None
+        self.acc_y: int | None = None
+        self.acc_z: int | None = None
+        self.gyro_x: int | None = None
+        self.gyro_y: int | None = None
+        self.gyro_z: int | None = None
+        self.last_raw_imu_at: float | None = None
 
     def feed(self, data: bytes, received_at: float | None = None) -> list[SensorSample]:
         """Принимает байты и возвращает обновлённые согласованные образцы."""
@@ -184,7 +216,18 @@ class MspParser:
             self.last_altitude_at = now
         elif command == MSP_RAW_IMU and len(payload) >= 18:
             # MSP_RAW_IMU: ACC X/Y/Z, GYRO X/Y/Z, MAG X/Y/Z, по int16.
-            _, _, _, _, _, _, self.mag_x, self.mag_y, self.mag_z = struct.unpack_from("<hhhhhhhhh", payload)
+            (
+                self.acc_x,
+                self.acc_y,
+                self.acc_z,
+                self.gyro_x,
+                self.gyro_y,
+                self.gyro_z,
+                self.mag_x,
+                self.mag_y,
+                self.mag_z,
+            ) = struct.unpack_from("<hhhhhhhhh", payload)
+            self.last_raw_imu_at = now
             self.last_mag_at = now
         elif command == MSP_RAW_GPS and len(payload) >= 16:
             # MSP_RAW_GPS: fix, satellites, lat/lon 1e-7 deg, altitude m,
@@ -231,6 +274,14 @@ class MspParser:
             gps_course_deg=self.gps_course_deg,
             gps_hdop=self.gps_hdop,
             gps_received_at=self.last_gps_at,
+            acc_x=self.acc_x,
+            acc_y=self.acc_y,
+            acc_z=self.acc_z,
+            gyro_x=self.gyro_x,
+            gyro_y=self.gyro_y,
+            gyro_z=self.gyro_z,
+            raw_imu_received_at=self.last_raw_imu_at,
+            updated_command=command,
         )
 
 

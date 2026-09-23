@@ -13,6 +13,7 @@ class Mode(str, Enum):
     IDLE = "Ожидание"
     CAPTURE = "Захват"
     TRACKING = "Следить"
+    CONTROL = "Контроль"
     LOST = "Цель потеряна"
     DISABLED = "Отключено"
     RETURN = "Возврат"

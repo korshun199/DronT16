@@ -70,6 +70,18 @@ class TargetTracker:
             return None
         return target
 
+    def object_area_percent(self, frame: Any, target: TargetBox) -> float | None:
+        """Возвращает площадь объекта внутри рамки относительно всего кадра."""
+        if self._verifier is None:
+            return None
+        return self._verifier.object_area_percent(frame, target)
+
+    def frame_fill_percent(self, frame: Any, target: TargetBox) -> float | None:
+        """Возвращает отдельную оценку заполнения кадра для порога контроля."""
+        if self._verifier is None:
+            return None
+        return self._verifier.frame_fill_percent(frame, target)
+
     def reset(self) -> None:
         """Останавливает текущее сопровождение без выбора новой цели."""
         self._tracker = None

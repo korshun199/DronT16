@@ -70,7 +70,7 @@ def sensor_batch(cycle: int) -> bytes:
     )
 
 
-def load_test_config() -> tuple[dict[str, object], dict[str, object]]:
+def load_test_config() -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
     """Читает безопасные настройки теста и карту источников датчиков."""
     path = PROJECT_DIR / "config/dront16.toml"
     try:
@@ -80,15 +80,25 @@ def load_test_config() -> tuple[dict[str, object], dict[str, object]]:
         raise RuntimeError(f"Не удалось прочитать конфигурацию {path}: {error}") from error
     test_config = config.get("sensor_test")
     sensor_config = config.get("sensors")
-    if not isinstance(test_config, dict) or not isinstance(sensor_config, dict):
-        raise RuntimeError("В config/dront16.toml отсутствуют [sensor_test] или [sensors]")
-    return test_config, sensor_config
+    logging_config = config.get("logging")
+    if not isinstance(test_config, dict) or not isinstance(sensor_config, dict) or not isinstance(logging_config, dict):
+        raise RuntimeError("В config/dront16.toml отсутствует [sensor_test], [sensors] или [logging]")
+    return test_config, sensor_config, logging_config
+
+
+def category_set(value: object) -> set[str] | None:
+    """Приводит список категорий журнала из TOML к верхнему регистру."""
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise RuntimeError("Категории журнала должны быть TOML-массивом строк")
+    return {item.upper() for item in value}
 
 
 def main() -> int:
     """Запускает локальную проверку MSP-парсера и журнала датчиков."""
     try:
-        test_config, sensor_config = load_test_config()
+        test_config, sensor_config, logging_config = load_test_config()
         if not bool(test_config.get("enabled", False)):
             raise RuntimeError("sensor_test.enabled=false; локальный тест отключён")
         cycles = int(test_config.get("cycles", 3))
@@ -106,7 +116,14 @@ def main() -> int:
         return 1
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    journal = EventJournal(log_path, "SENSOR_TEST")
+    journal = EventJournal(
+        log_path,
+        "SENSOR_TEST",
+        console_enabled=bool(logging_config.get("console_enabled", True)),
+        file_enabled=bool(logging_config.get("file_enabled", True)),
+        console_categories=category_set(logging_config.get("console_categories")),
+        file_categories=category_set(logging_config.get("file_categories")),
+    )
     parser = MspParser()
     now = 0.0
     journal.begin_session()

@@ -12,6 +12,8 @@ import cv2
 from src.configuration import load_config_section
 from src.control.follow_config import load_follow_config
 from src.control.guidance import calculate_guidance
+from src.control.target_control import write_target_guidance
+from src.control.target_range import RangeEstimatorConfig, TargetRangeEstimator
 from src.core.state_machine import Command, Mode, TargetBox, TargetStateMachine
 from src.interface.overlay import draw_overlay
 from src.interface.osd_config import load_osd_config
@@ -93,6 +95,9 @@ def main() -> int:
     web_port = int(args.web_port or video_config["web_port"])
     j7_device = str(args.j7_device or video_config["j7_device"])
     control_file = str(args.control_file or video_config["control_file"])
+    target_state_file = follow_config.control.state_file
+    receiver_config = load_config_section(args.config, "receiver")
+    arm_state_file = Path(str(receiver_config.get("arm_state_file", "/tmp/dront16_arm_state")))
     fullscreen = bool(video_config["hdmi_fullscreen"] if args.fullscreen is None else args.fullscreen)
     if display_name == "auto":
         display_name = "j7" if sys.platform.startswith("linux") and Path("/proc/device-tree/model").exists() else "web"
@@ -108,6 +113,14 @@ def main() -> int:
         follow_config.verification.foreground_margin_percent,
     ) if follow_config.verification.enabled and follow_config.verification.method != "disabled" else None
     tracker = TargetTracker(verifier, follow_config.tracker.algorithm)
+    range_estimator = TargetRangeEstimator(
+        RangeEstimatorConfig(
+            follow_config.range.horizontal_deadband_percent,
+            follow_config.range.size_change_deadband_percent,
+            follow_config.range.smoothing_alpha,
+            follow_config.range.control_threshold_percent,
+        )
+    )
     hub = FrameHub()
     display_mode = Mode.IDLE
     if display_name in ("web", "both"):
@@ -137,24 +150,12 @@ def main() -> int:
         cv2.moveWindow("DronT16", args.hdmi_x, args.hdmi_y)
         if fullscreen:
             cv2.setWindowProperty("DronT16", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-    message = "1: DIRECT | 2: CAPTURE | 3: FOLLOW | Q: EXIT"
-    last_report = 0.0
-
-    def report_guidance(frame: object, target: TargetBox, color: str, force: bool = False) -> None:
-        """Печатает только координаты цели заданным цветом."""
-        nonlocal last_report
-        now = time.monotonic()
-        if not force and now - last_report < follow_config.guidance.report_period_ms / 1000.0:
-            return
-        result = calculate_guidance(target, frame.shape[1], frame.shape[0], follow_config)
-        reset = "\033[0m"
-        print(
-            f"{color}[TARGET] x={result.target_x:.1f}px y={result.target_y:.1f}px "
-            f"norm=({result.normalized_x:+.3f},{result.normalized_y:+.3f}) "
-            f"angle yaw={result.yaw_error_deg:+.1f}deg pitch={result.pitch_error_deg:+.1f}deg{reset}",
-            flush=True,
-        )
-        last_report = now
+    message = "LIVE"
+    started_at = time.monotonic()
+    last_range_report = 0.0
+    last_reported_capture = False
+    last_under_control = False
+    last_terminal_report = 0.0
 
     try:
         while True:
@@ -166,7 +167,11 @@ def main() -> int:
                     message = "TARGET LOST: SELECT AGAIN AND PRESS 1"
             if machine.mode is Mode.LOST:
                 display_mode = Mode.LOST
-            rendered = draw_overlay(frame, display_mode, machine.target, message, osd_config)
+            # На J7 оставляем только графику: рамку и линию к цели.
+            # Пурпурный цвет включается после подтверждённого достижения порога.
+            overlay_mode = Mode.CONTROL if last_under_control else display_mode
+            overlay_message = "" if display_name == "j7" else message
+            rendered = draw_overlay(frame, overlay_mode, machine.target, overlay_message, osd_config)
             hub.update(rendered, display_mode, machine.target, message)
             if j7_output is not None:
                 j7_output.write(rendered)
@@ -201,7 +206,10 @@ def main() -> int:
                         message = "TRACKER ERROR: TARGET RESET"
                     else:
                         message = result.message
-                        report_guidance(frame, selected, "\033[32m", force=True)
+                        range_estimator.reset()
+                        message = "CAPTURE MODE"
+                        print("\033[33mРЕЖИМ ЗАХВАТА\033[0m", flush=True)
+                        last_reported_capture = True
                 else:
                     message = result.message
                 display_mode = machine.mode
@@ -210,15 +218,74 @@ def main() -> int:
                 message = result.message
                 display_mode = machine.mode
                 if result.accepted and machine.target is not None:
-                    report_guidance(frame, machine.target, "\033[31m", force=True)
+                    range_estimator.reset()
             elif command == Command.ABORT:
                 tracker.reset()
+                range_estimator.reset()
                 result = machine.handle(Command.ABORT)
                 message = result.message
                 display_mode = Mode.IDLE
             if machine.target is not None and machine.mode in (Mode.CAPTURE, Mode.TRACKING):
-                color = "\033[32m" if machine.mode is Mode.CAPTURE else "\033[31m"
-                report_guidance(frame, machine.target, color)
+                measured_area_percent = tracker.object_area_percent(frame, machine.target)
+                control_area_percent = tracker.frame_fill_percent(frame, machine.target)
+                measurement = range_estimator.update(
+                    machine.target, frame.shape[1], frame.shape[0], measured_area_percent,
+                    control_area_percent,
+                )
+                now = time.monotonic()
+                arm_active = False
+                try:
+                    arm_active = arm_state_file.read_text(encoding="ascii").strip() == "ARM"
+                except (FileNotFoundError, OSError, UnicodeError):
+                    arm_active = False
+                if arm_active and now - last_terminal_report >= follow_config.range.report_period_ms / 1000.0:
+                    if machine.mode is Mode.CAPTURE:
+                        message = f"CAPTURE MODE | {measurement.horizontal_position}"
+                        terminal_color = "\033[33m"
+                    elif measurement.under_control:
+                        message = "КОНТРОЛЬ!"
+                        terminal_color = "\033[35m"
+                    else:
+                        message = f"ОТ ЗАХВАТА: {measurement.relative_size_change_percent:+.1f}%"
+                        terminal_color = "\033[31m"
+                    elapsed = now - started_at
+                    minutes = int(elapsed // 60)
+                    seconds = elapsed % 60
+                    # Пороговое событие выводится отдельной строкой один раз.
+                    if not measurement.under_control or not last_under_control:
+                        print(f"{terminal_color}[{minutes:02d}:{seconds:06.3f}] {message}\033[0m", flush=True)
+                    last_terminal_report = now
+                    last_range_report = now
+                last_under_control = measurement.under_control
+                guidance = calculate_guidance(
+                    machine.target, frame.shape[1], frame.shape[0], follow_config
+                )
+                write_target_guidance(
+                    target_state_file,
+                    valid=True,
+                    yaw_error_deg=guidance.yaw_error_deg,
+                    pitch_error_deg=guidance.pitch_error_deg,
+                    mode=machine.mode.value,
+                )
+            else:
+                try:
+                    arm_active = arm_state_file.read_text(encoding="ascii").strip() == "ARM"
+                except (FileNotFoundError, OSError, UnicodeError):
+                    arm_active = False
+                now = time.monotonic()
+                if arm_active and now - last_terminal_report >= follow_config.range.report_period_ms / 1000.0:
+                    print(f"\033[37m[DIRECT/LIVE]\033[0m", flush=True)
+                    last_terminal_report = now
+                # После отбоя или потери цели мост не должен использовать старые координаты.
+                write_target_guidance(
+                    target_state_file,
+                    valid=False,
+                    yaw_error_deg=None,
+                    pitch_error_deg=None,
+                    mode=machine.mode.value,
+                )
+                last_reported_capture = False
+                last_under_control = False
     finally:
         tracker.reset()
         source.close()
