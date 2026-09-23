@@ -246,7 +246,7 @@ def main() -> int:
                         message = "КОНТРОЛЬ!"
                         terminal_color = "\033[35m"
                     else:
-                        message = f"ОТ ЗАХВАТА: {measurement.relative_size_change_percent:+.1f}%"
+                        message = f"FOLLOW MODE | {measurement.horizontal_position}"
                         terminal_color = "\033[31m"
                     elapsed = now - started_at
                     minutes = int(elapsed // 60)
