@@ -20,6 +20,9 @@ class TargetControlTests(unittest.TestCase):
                 yaw_error_deg=-8.5,
                 pitch_error_deg=1.0,
                 mode="Следить",
+                normalized_x=-0.2,
+                normalized_y=0.1,
+                scale_percent=4.5,
             )
             guidance = read_target_guidance(path)
             self.assertIsNotNone(guidance)
@@ -27,6 +30,8 @@ class TargetControlTests(unittest.TestCase):
             self.assertTrue(guidance.is_fresh(guidance.updated_at + 0.1, 0.3))
             self.assertFalse(guidance.is_fresh(guidance.updated_at + 0.4, 0.3))
             self.assertEqual(guidance.yaw_error_deg, -8.5)
+            self.assertTrue(guidance.is_complete(guidance.updated_at + 0.1, 0.3, 0.05))
+            self.assertEqual(guidance.scale_percent, 4.5)
 
     def test_invalid_snapshot_is_not_usable(self) -> None:
         """Повреждённый или отсутствующий файл не даёт старой команды."""

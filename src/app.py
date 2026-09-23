@@ -17,6 +17,7 @@ from src.control.target_range import RangeEstimatorConfig, TargetRangeEstimator
 from src.core.state_machine import Command, Mode, TargetBox, TargetStateMachine
 from src.interface.overlay import draw_overlay
 from src.interface.osd_config import load_osd_config
+from src.interface.betaflight_osd import draw_betaflight_osd, load_betaflight_osd_config
 from src.interface.web import FrameHub, start_web_preview
 from src.target.tracker import TargetTracker
 from src.target.verifier import TargetVerifier
@@ -86,6 +87,9 @@ def main() -> int:
         video_config = load_config_section(args.config, "video")
         follow_config = load_follow_config(args.follow_config or args.config)
         osd_config = load_osd_config(args.osd_config or args.config)
+        betaflight_osd_config = load_betaflight_osd_config(
+            load_config_section(args.osd_config or args.config, "osd")
+        )
     except ValueError as error:
         print(f"[DronT16] Ошибка конфигурации сопровождения: {error}", file=sys.stderr)
         return 2
@@ -190,6 +194,8 @@ def main() -> int:
                     message = "TARGET LOST: SELECT AGAIN AND PRESS 1"
             if machine.mode is Mode.LOST:
                 display_mode = Mode.LOST
+            # Штатное OSD Betaflight рисуется первым, наша рамка — поверх него.
+            frame = draw_betaflight_osd(frame, betaflight_osd_config)
             # На J7 оставляем только графику: рамку и линию к цели.
             # Пурпурный цвет включается после подтверждённого достижения порога.
             overlay_mode = Mode.CONTROL if last_under_control else display_mode
@@ -289,6 +295,9 @@ def main() -> int:
                     yaw_error_deg=guidance.yaw_error_deg,
                     pitch_error_deg=guidance.pitch_error_deg,
                     mode=machine.mode.value,
+                    normalized_x=guidance.normalized_x,
+                    normalized_y=guidance.normalized_y,
+                    scale_percent=measurement.object_area_percent,
                 )
             else:
                 try:
@@ -306,6 +315,9 @@ def main() -> int:
                     yaw_error_deg=None,
                     pitch_error_deg=None,
                     mode=machine.mode.value,
+                    normalized_x=None,
+                    normalized_y=None,
+                    scale_percent=None,
                 )
                 last_reported_capture = False
                 last_under_control = False

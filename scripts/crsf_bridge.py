@@ -16,6 +16,11 @@ from src.diagnostics.journal import Color, EventJournal
 from src.configuration import load_config_section
 from src.control.failsafe import FailsafeConfig, FailsafeController
 from src.control.target_control import TargetGuidance, read_target_guidance
+from src.control.visual_servoing import (
+    VisualServoController,
+    VisualServoState,
+    build_visual_servo_config,
+)
 from src.receiver.crsf import (
     CRSF_LINK_STATISTICS,
     CRSF_RC_CHANNELS_PACKED,
@@ -26,6 +31,7 @@ from src.receiver.crsf import (
 from src.receiver.mode import ModeThresholds, ReceiverModeDecoder
 from src.receiver.takeover import TakeoverConfig, TakeoverController, TakeoverState
 from src.protocols.betaflight_msp_link import BetaflightMspLink, SensorSample, msp_command_name
+from src.protocols.msp_displayport import DisplayPortCanvas, MspDisplayPortLink
 
 
 def load_config() -> dict[str, int | str]:
@@ -49,9 +55,23 @@ def load_target_control_config() -> dict[str, object]:
     return load_config_section(PROJECT_DIR / "config/dront16.toml", "follow", "control")
 
 
+def load_visual_servo_config() -> dict[str, object]:
+    """Загружает параметры внешнего контура сопровождения цели."""
+    return load_config_section(PROJECT_DIR / "config/dront16.toml", "visual_servoing")
+
+
 def load_logging_config() -> dict[str, object]:
     """Загружает независимые настройки консольного и файлового каналов."""
     return load_config_section(PROJECT_DIR / "config/dront16.toml", "logging")
+
+
+def load_betaflight_osd_config() -> dict[str, object]:
+    """Загружает безопасно отключаемую секцию приёма MSP DisplayPort."""
+    osd_config = load_config_section(PROJECT_DIR / "config/dront16.toml", "osd")
+    raw = osd_config.get("betaflight", {})
+    if not isinstance(raw, dict):
+        raise ValueError("osd.betaflight должна быть TOML-секцией")
+    return raw
 
 
 def category_set(value: object) -> set[str] | None:
@@ -69,7 +89,9 @@ def main() -> int:
     control = load_takeover_config()
     msp_config, failsafe_config = load_bridge_sections()
     target_config = load_target_control_config()
+    visual_config = load_visual_servo_config()
     logging_config = load_logging_config()
+    betaflight_osd_config = load_betaflight_osd_config()
     receiver_config = load_config_section(PROJECT_DIR / "config/dront16.toml", "receiver")
     mode_config = load_config_section(PROJECT_DIR / "config/dront16.toml", "receiver", "mode")
     failsafe_mode = str(failsafe_config.get("mode", "CH7")).upper()
@@ -97,6 +119,17 @@ def main() -> int:
     log_file = PROJECT_DIR / str(config.get("log_file", "simulator_filesafe.log"))
     console_categories = category_set(logging_config.get("console_categories"))
     file_categories = category_set(logging_config.get("file_categories"))
+    displayport_enabled = bool(betaflight_osd_config.get("enabled", False))
+    displayport_state_file = Path(str(
+        betaflight_osd_config.get("state_file", "/tmp/dront16_betaflight_osd.json")
+    ))
+    displayport_canvas = DisplayPortCanvas(
+        int(betaflight_osd_config.get("columns", 30)),
+        int(betaflight_osd_config.get("rows", 13)),
+    )
+    displayport_port = str(betaflight_osd_config.get("serial_port", "/dev/ttyAMA4"))
+    displayport_baudrate = int(betaflight_osd_config.get("baudrate", 115200))
+    displayport_report_period_s = int(betaflight_osd_config.get("diagnostic_report_ms", 2000)) / 1000.0
 
     mode_channel = int(receiver_config["mode_channel"]) - 1
     mode_decoder = ReceiverModeDecoder(
@@ -167,7 +200,9 @@ def main() -> int:
         file_categories=file_categories,
     )
     msp_link: BetaflightMspLink | None = None
+    displayport_link: MspDisplayPortLink | None = None
     failsafe: FailsafeController | None = None
+    visual_servo: VisualServoController | None = None
     latest_sensor: SensorSample | None = None
     last_sensor_log = 0.0
     last_repetitive_event_log = 0.0
@@ -175,6 +210,7 @@ def main() -> int:
     last_pilot_log = 0.0
     last_pilot_action_values: tuple[int, ...] | None = None
     last_rc_interval_ms: float | None = None
+    last_displayport_report = 0.0
 
     # До первого свежего кадра считаем терминальный диагностический вывод неактивным.
     try:
@@ -183,6 +219,13 @@ def main() -> int:
         journal.write("RPI", f"ARM STATE WARNING: {error}", Color.YELLOW, file=False)
 
     try:
+        visual_servo = VisualServoController(
+            build_visual_servo_config(
+                visual_config,
+                target_max_age_s=target_max_age_s,
+                sensor_max_age_s=int(msp_config["sensor_max_age_ms"]) / 1000.0,
+            )
+        )
         if bool(msp_config.get("enabled", False)):
             msp_link = BetaflightMspLink(
                 str(msp_config["serial_port"]),
@@ -230,11 +273,18 @@ def main() -> int:
                         climb_guard_altitude_error_m=float(failsafe_config["climb_guard_altitude_error_m"]),
                         climb_guard_vario_m_s=float(failsafe_config["climb_guard_vario_m_s"]),
                         climb_guard_max_throttle=int(failsafe_config["climb_guard_max_throttle"]),
-                        target_yaw_deadband_deg=float(failsafe_config["target_yaw_deadband_deg"]),
-                        target_yaw_correction_per_degree=float(failsafe_config["target_yaw_correction_per_degree"]),
-                        target_yaw_max_correction=int(failsafe_config["target_yaw_max_correction"]),
                     )
                 )
+        if displayport_enabled:
+            displayport_link = MspDisplayPortLink(
+                displayport_port, displayport_baudrate, displayport_canvas, displayport_state_file
+            )
+            journal.write(
+                "RPI",
+                f"OSD DISPLAYPORT: UART={displayport_port} {displayport_baudrate} бод; "
+                f"сетка={displayport_canvas.columns}x{displayport_canvas.rows}",
+                Color.CYAN,
+            )
     except (OSError, ValueError, KeyError, TypeError) as error:
         journal.write("RPI", f"ERROR: MSP/failsafe config: {error}", Color.RED)
         journal.close()
@@ -329,11 +379,36 @@ def main() -> int:
         journal.write("RPI", f"CONFIG: FAILSAFE={'ON' if failsafe is not None else 'OFF'}; FC PID сохраняется", Color.CYAN)
     else:
         journal.write("RPI", "PORT: MSP SENSOR отключён; используется только CRSF-мост", Color.YELLOW)
+    if visual_servo is not None:
+        journal.write(
+            "RPI",
+            f"CONFIG: VISUAL_SERVO={'ON' if visual_servo.config.enabled else 'OFF'} "
+            f"output={visual_servo.config.output_mode}",
+            Color.CYAN,
+        )
     print("[CRSF BRIDGE] Ctrl+C — остановка передачи", flush=True)
 
     try:
         with CrsfReceiver(serial_port, baudrate, write_enabled=True) as bridge_uart:
             while True:
+                if displayport_link is not None:
+                    completed_osd_frames = displayport_link.poll()
+                    if completed_osd_frames:
+                        journal.write(
+                            "FC",
+                            f"OSD DISPLAYPORT FRAME={displayport_canvas.frame_counter}",
+                            Color.CYAN,
+                            console=False,
+                        )
+                    displayport_now = time.monotonic()
+                    if displayport_now - last_displayport_report >= displayport_report_period_s:
+                        # Отдельная строка journalctl не зависит от фильтров
+                        # диагностического журнала и показывает физическую линию.
+                        print(
+                            f"[DronT16] OSD UART {displayport_port}: {displayport_link.status_text()}",
+                            flush=True,
+                        )
+                        last_displayport_report = displayport_now
                 if msp_link is not None:
                     for sample in msp_link.poll():
                         latest_sensor = sample
@@ -354,6 +429,9 @@ def main() -> int:
                                 console=sensor_terminal,
                             )
                             last_sensor_log = now_sensor
+                    # Этот UART выделен только под датчики; освобождаем
+                    # внутренний список проверенных пакетов каждого цикла.
+                    msp_link.drain_packets()
                 rc_frame_seen = False
                 for frame in bridge_uart.read_raw_frames(buffer):
                     received_frames += 1
@@ -422,10 +500,6 @@ def main() -> int:
                     target_guidance: TargetGuidance | None = (
                         read_target_guidance(target_state_file) if target_mode_active else None
                     )
-                    target_guidance_fresh = (
-                        target_guidance is not None
-                        and target_guidance.is_fresh(now, target_max_age_s)
-                    )
                     if changed:
                         mode_command = {"DIRECT": "1", "CAPTURE": "2", "FOLLOW": "3"}[selected_mode.value]
                         command_file.write_text(mode_command, encoding="ascii")
@@ -435,11 +509,7 @@ def main() -> int:
                             Color.CYAN,
                         )
                         if target_mode_active:
-                            journal.write(
-                                "RPI",
-                                "TARGET_CONTROL: RPI принимает управление; цель используется только для yaw",
-                                Color.YELLOW,
-                            )
+                            journal.write("RPI", "VISUAL_SERVO: запрошен режим FOLLOW", Color.YELLOW)
 
                     # В REAL CH7 игнорируется: takeover начинается только по тайм-ауту входных кадров.
                     result = takeover.process(
@@ -504,13 +574,6 @@ def main() -> int:
                             armed=False,
                         )
                     if failsafe is not None and result.output_kind != "DISARM":
-                        target_takeover = target_mode_active and result.state is TakeoverState.LIVE
-                        if target_takeover and not target_guidance_fresh:
-                            journal.write(
-                                "RPI",
-                                "TARGET_CONTROL: цель отсутствует или устарела; yaw удерживается по центру",
-                                Color.YELLOW,
-                            )
                         failsafe_result = failsafe.process(
                             output_frame,
                             unpack_channels(output_frame[3:-1]),
@@ -518,10 +581,6 @@ def main() -> int:
                             latest_sensor,
                             now,
                             armed=not result.disarmed,
-                            target_mode=target_takeover,
-                            target_yaw_error_deg=(
-                                target_guidance.yaw_error_deg if target_guidance_fresh and target_guidance else None
-                            ),
                         )
                         for event in failsafe_result.events:
                             event_kind = "SAFETY" if "FAULT" in event else "DECISION"
@@ -547,6 +606,40 @@ def main() -> int:
                             last_command_log = now
                         if failsafe_result.disarm_requested:
                             journal.write("RPI", "COMMAND TO FC: RC CH5 DISARM; MOTORS OFF", Color.RED)
+                    if visual_servo is not None:
+                        visual_result = visual_servo.process(
+                            output_frame,
+                            tuple(unpack_channels(output_frame[3:-1])),
+                            selected_mode.value,
+                            target_guidance,
+                            latest_sensor,
+                            now,
+                            armed=not result.disarmed,
+                            takeover_allowed=(
+                                result.state is TakeoverState.LIVE
+                                and (failsafe_result is None or failsafe_result.state.value == "LIVE")
+                            ),
+                        )
+                        output_frame = visual_result.output_frame
+                        for event in visual_result.events:
+                            color = Color.RED if visual_result.fault else Color.YELLOW
+                            journal.write("RPI", f"VISUAL_SERVO: {event}", color)
+                        if visual_result.target_lost and visual_result.events:
+                            # Потерянная цель не переобнаруживается: видеомодуль
+                            # возвращается в DIRECT и ждёт нового CAPTURE пилота.
+                            command_file.write_text("1", encoding="ascii")
+                        if visual_result.state not in {
+                            VisualServoState.DIRECT,
+                            VisualServoState.CAPTURE,
+                        } and (visual_result.events or now - last_command_log >= command_log_period_s):
+                            action = "COMMAND" if visual_result.output_applied else "DRY-RUN"
+                            journal.write(
+                                "RPI",
+                                f"VISUAL_SERVO {action}: state={visual_result.state.value} "
+                                f"{format_channels(visual_result.computed_channels)}",
+                                Color.RED if visual_result.output_applied else Color.YELLOW,
+                            )
+                            last_command_log = now
                     bridge_uart.write_frame(output_frame)
                     forwarded_frames += 1
                     last_rc_time = now
@@ -587,6 +680,17 @@ def main() -> int:
                         timeout_result = takeover.repeat_without_receiver(timeout_now)
                 if timeout_result is not None:
                     output_frame = timeout_result.output_frame
+                    if visual_servo is not None:
+                        visual_servo.process(
+                            output_frame,
+                            tuple(unpack_channels(output_frame[3:-1])),
+                            selected_mode.value,
+                            None,
+                            latest_sensor,
+                            time.monotonic(),
+                            armed=True,
+                            takeover_allowed=False,
+                        )
                     if failsafe is not None:
                         timeout_failsafe = failsafe.process(
                             output_frame,
@@ -646,6 +750,8 @@ def main() -> int:
     finally:
         if msp_link is not None:
             msp_link.close()
+        if displayport_link is not None:
+            displayport_link.close()
         journal.close()
 
 

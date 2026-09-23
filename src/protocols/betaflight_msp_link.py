@@ -21,6 +21,8 @@ MSP_ATTITUDE = 108
 MSP_ALTITUDE = 109
 MSP_RAW_IMU = 102
 MSP_RAW_GPS = 106
+# Внешнее OSD: полётник сам отправляет команды отрисовки на MSP-UART.
+MSP_DISPLAYPORT = 182
 
 # Допустимые команды MSP для подписывания записей диагностического журнала.
 MSP_COMMAND_NAMES = {
@@ -28,6 +30,7 @@ MSP_COMMAND_NAMES = {
     MSP_ALTITUDE: "ALTITUDE",
     MSP_RAW_IMU: "RAW_IMU",
     MSP_RAW_GPS: "RAW_GPS",
+    MSP_DISPLAYPORT: "DISPLAYPORT",
 }
 
 
@@ -137,6 +140,15 @@ class SensorSample:
         return math.degrees(math.atan2(self.mag_y, self.mag_x)) % 360.0
 
 
+@dataclass(frozen=True)
+class MspPacket:
+    """Проверенный MSP v1 пакет, сохранённый для внешних потребителей UART."""
+
+    command: int
+    payload: bytes
+    received_at: float
+
+
 class MspParser:
     """Разбирает ответы MSP v1 с проверкой заголовка и checksum."""
 
@@ -170,6 +182,8 @@ class MspParser:
         self.gyro_y: int | None = None
         self.gyro_z: int | None = None
         self.last_raw_imu_at: float | None = None
+        # В мосте нужен не только образец датчиков, но и DisplayPort пакеты.
+        self.packets: list[MspPacket] = []
 
     def feed(self, data: bytes, received_at: float | None = None) -> list[SensorSample]:
         """Принимает байты и возвращает обновлённые согласованные образцы."""
@@ -197,10 +211,17 @@ class MspParser:
             payload = packet[5:-1]
             if msp_checksum(payload_size, packet[4], payload) != packet[-1]:
                 continue
+            self.packets.append(MspPacket(packet[4], payload, now))
             sample = self._apply(packet[4], payload, now)
             if sample is not None:
                 samples.append(sample)
         return samples
+
+    def drain_packets(self) -> list[MspPacket]:
+        """Возвращает и очищает все проверенные пакеты после одного poll()."""
+        packets = self.packets
+        self.packets = []
+        return packets
 
     def _apply(self, command: int, payload: bytes, now: float) -> SensorSample | None:
         """Применяет один проверенный ответ MSP к состоянию датчиков."""
@@ -336,6 +357,10 @@ class BetaflightMspLink:
             return self.parser.feed(os.read(self._fd, 4096), current_time)
         except BlockingIOError:
             return []
+
+    def drain_packets(self) -> list[MspPacket]:
+        """Отдаёт пакеты последнего чтения, включая MSP_DISPLAYPORT."""
+        return self.parser.drain_packets()
 
     def close(self) -> None:
         """Закрывает MSP UART."""

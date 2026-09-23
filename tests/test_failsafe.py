@@ -156,42 +156,5 @@ class FailsafeTests(unittest.TestCase):
         self.assertTrue(result.disarm_requested)
         self.assertEqual(unpack_channels(result.output_frame[3:-1])[4], 191)
 
-    def test_target_control_holds_level_altitude_and_points_yaw(self) -> None:
-        """TARGET_CONTROL не запускает разворот, а наводит yaw на цель."""
-        controller = FailsafeController(config())
-        channels = tuple([992] * 16)
-        current = frame(channels)
-
-        leveling = controller.process(
-            current, channels, "TARGET", sensor(received_at=0.0), 0.0,
-            target_mode=True, target_yaw_error_deg=12.0,
-        )
-        self.assertEqual(leveling.state, FailsafeState.LEVELING)
-        self.assertEqual(leveling.yaw_command, 992)
-
-        holding = controller.process(
-            leveling.output_frame,
-            unpack_channels(leveling.output_frame[3:-1]),
-            "TARGET",
-            sensor(received_at=1.1),
-            1.1,
-            target_mode=True,
-            target_yaw_error_deg=12.0,
-        )
-        self.assertEqual(holding.state, FailsafeState.HOLDING)
-        self.assertEqual(holding.yaw_command, 1208)
-        self.assertNotIn("TURNING", " ".join(holding.events))
-
-    def test_target_control_returns_to_live(self) -> None:
-        """Выход из верхнего положения CH6 возвращает исходные RC-команды."""
-        controller = FailsafeController(config())
-        channels = tuple([992] * 16)
-        current = frame(channels)
-        controller.process(current, channels, "TARGET", sensor(), 0.0, target_mode=True)
-        live = controller.process(current, channels, "LIVE", sensor(received_at=0.1), 0.1)
-        self.assertEqual(live.state, FailsafeState.LIVE)
-        self.assertEqual(live.output_frame, current)
-
-
 if __name__ == "__main__":
     unittest.main()

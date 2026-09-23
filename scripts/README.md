@@ -4,10 +4,10 @@
 
 ## Рабочие входы
 
-- `../run` — единственная команда запуска всей системы;
-- `../run sensor-test` — локальный тест привязки MSP-датчиков без UART,
+- `../run.sh` — единственная команда запуска всей системы;
+- `../run.sh sensor-test` — локальный тест привязки MSP-датчиков без UART,
   камеры, CRSF и команд полётнику;
-- `crsf_bridge.py` — управляемый CRSF/MSP-мост, запускаемый из `run`;
+- `crsf_bridge.py` — управляемый CRSF/MSP-мост, запускаемый из `run.sh`;
 - `rpi.sh` — проверка Raspberry, чтение журнала и безопасная синхронизация;
 
 Разовые стендовые диагностики и старый текстовый симулятор удалены из рабочей
@@ -29,7 +29,7 @@ config/dront16.toml
         ├── video, osd.*
         ├── follow.*
         ├── receiver.*
-        ├── bridge, msp, failsafe
+        ├── bridge, msp, failsafe, visual_servoing
         ├── simulation.*
         └── logging, runtime
 ```

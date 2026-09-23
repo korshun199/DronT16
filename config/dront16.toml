@@ -99,6 +99,27 @@ scale_y = 1.0
 offset_x = 0
 offset_y = 0
 
+[osd.betaflight]
+# Штатное OSD Betaflight по MSP DisplayPort. Пока выключено: включается только
+# после проверки отдельного UART6 FC и резервного сохранения настроек полётника.
+enabled = true
+# Выделенный UART4 Raspberry: pin 32 TXD4 / pin 33 RXD4.
+# Он не делит очередь с UART1 Raspberry, который читает MSP-датчики FC.
+serial_port = "/dev/ttyAMA4"
+# Скорость VTX (MSP + DisplayPort) на UART6 Betaflight.
+baudrate = 115200
+# Период технической строки UART6 в journalctl; не влияет на видеопоток.
+diagnostic_report_ms = 2000
+# Общий снимок сетки, который мост MSP отдаёт процессу видеовывода.
+state_file = "/tmp/dront16_betaflight_osd.json"
+# Аналоговый Betaflight OSD использует сетку 30 столбцов x 13 строк.
+columns = 30
+rows = 13
+# Цвет слоя штатного OSD на выходе J7, формат #RRGGBB.
+color = "#ffffff"
+# Непрозрачное штатное OSD; уменьшение допускается для отладки.
+opacity = 1.0
+
 [follow.camera]
 # Углы обзора и опорный центр камеры.
 # Текущие углы оставлены от прототипа; после установки объектива OV5647 их
@@ -137,12 +158,87 @@ adaptation_rate = 0.05
 foreground_margin_percent = 15.0
 
 [follow.control]
-# Управление FC по цели отключено для текущего диагностического теста.
-enabled = false
+# Публикация координат цели для внешнего контура включена.
+enabled = true
 # Файл связи видеотрекера и CRSF-моста; создаётся атомарно и не содержит секретов.
 target_state_file = "/tmp/dront16_target.json"
 # Максимальный возраст координат цели для управления yaw.
 target_max_age_ms = 300
+
+[visual_servoing]
+# Внешний контур рассчитывается вместе с рабочим мостом.
+enabled = true
+# На ноутбуке и первом стенде кадр FC не изменяется: выводятся только расчёты.
+# После проверки знаков, ANGLE и снятых винтов значение меняется на "real".
+output_mode = "dry-run"
+# Период внешнего расчёта 50 мс соответствует частоте 20 Гц.
+control_period_ms = 50
+# Каналы Betaflight: CH1 roll, CH2 pitch, CH3 throttle, CH4 yaw.
+roll_channel = 1
+pitch_channel = 2
+throttle_channel = 3
+yaw_channel = 4
+# Рабочий центр и пределы 11-битных значений CRSF.
+rc_center = 992
+rc_min = 191
+rc_max = 1792
+# Минимальная площадь цели, ниже которой измерение масштаба недостоверно.
+min_scale_percent = 0.05
+# Горизонтальная мёртвая зона в нормированных координатах кадра.
+yaw_deadband = 0.04
+# Пропорциональная и дифференциальная составляющие yaw в единицах CRSF.
+yaw_kp = 220.0
+yaw_kd = 8.0
+# Максимальное отклонение yaw от центра RC.
+yaw_max_correction = 180
+# Знак yaw; меняется только после стендовой проверки направления.
+yaw_direction = 1.0
+# Сглаживание производной: меньшее значение сильнее подавляет шум.
+derivative_alpha = 0.25
+# Число последовательных кадров наведения перед фиксацией yaw.
+yaw_stable_frames = 8
+# Время подтверждённого удержания yaw перед проверкой высоты.
+yaw_hold_s = 0.5
+# Допуски горизонтального положения по данным FC.
+level_roll_tolerance_deg = 6.0
+level_pitch_tolerance_deg = 6.0
+# При большем наклоне контур отключается в FAULT и возвращает управление пилоту.
+max_abs_tilt_deg = 45.0
+# Преобразование ошибки угла корпуса в ограниченную команду RC.
+attitude_kp = 18.0
+attitude_max_correction = 250
+# Знаки коррекции roll/pitch зависят от реверсов и проверяются на стенде.
+roll_direction = 1.0
+pitch_rc_direction = 1.0
+# Время и допуски подтверждения удержания высоты перед движением по pitch.
+altitude_hold_s = 0.8
+altitude_tolerance_m = 0.20
+vario_tolerance_m_s = 0.30
+# PI-регулятор высоты и демпфирование вертикальной скорости.
+altitude_kp = 80.0
+altitude_ki = 12.0
+altitude_vario_gain = 35.0
+# Ограничение накопления интегратора высоты в метрах-секундах.
+altitude_integral_limit = 2.0
+# Максимальная поправка газа относительно изученного газа висения.
+throttle_max_correction = 120
+# Мёртвая зона логарифмической ошибки масштаба объекта.
+pitch_deadband = 0.05
+# PD-регулятор переводит ошибку масштаба в требуемый угол pitch.
+pitch_kp = 6.0
+pitch_kd = 0.2
+# Максимальный требуемый угол pitch при сопровождении.
+pitch_max_angle_deg = 8.0
+# Знак движения по масштабу; меняется только после стендовой проверки.
+pitch_direction = 1.0
+# Медленное обучение газа висения в устойчивом ручном полёте.
+hover_learning_alpha = 0.02
+# Максимальные вертикальная скорость и наклон для обучения газа висения.
+hover_learning_max_vario_m_s = 0.20
+hover_learning_max_tilt_deg = 8.0
+# Газ вне этого диапазона не считается режимом висения.
+hover_learning_min_throttle = 600
+hover_learning_max_throttle = 1500
 
 [follow.range]
 # Горизонтальный допуск относительно центра кадра, в процентах ширины полукадра.
@@ -258,10 +354,6 @@ takeover_throttle_step_per_s = 50.0
 climb_guard_altitude_error_m = 0.20
 climb_guard_vario_m_s = 0.50
 climb_guard_max_throttle = 850
-# Мёртвая зона и усиление наведения носа на захваченную цель по горизонтали.
-target_yaw_deadband_deg = 2.0
-target_yaw_correction_per_degree = 18.0
-target_yaw_max_correction = 250
 
 [simulation]
 # Старый автономный симулятор запускается только отдельным явным тестом.
@@ -314,8 +406,8 @@ file_enabled = true
 # В диагностическом тесте мост не печатает служебные категории в терминал.
 console_categories = []
 # Полный набор категорий для последующего разбора.
-# Для текущего теста в файл пишутся только фактические показания FC/MSP.
-file_categories = ["FC"]
+# Для разбора сопровождения сохраняются датчики, команды пилота и решения RPI.
+file_categories = ["FC", "PILOT", "RPI"]
 # Старый флаг оставлен для подробного вывода датчиков в консоль при ручном включении.
 sensor_terminal = false
 

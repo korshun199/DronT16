@@ -69,7 +69,7 @@ show_config() {
 check_remote() {
     # Проверяет связь, время, службу, процессы и доступность журнала.
     local command
-    command="printf '[RPI] hostname='; hostname; printf '[RPI] addresses='; hostname -I; date '+[RPI] time=%F %T.%3N %Z %z'; timedatectl show --property=Timezone --property=NTPSynchronized --property=NTP --value 2>/dev/null | sed 's/^/[RPI] time-status=/'; printf '[RPI] service='; systemctl is-active '${RPI_SERVICE}' 2>/dev/null || true; printf '[RPI] processes:\\n'; pgrep -af 'crsf_bridge.py|src.app|(^|/)run( |$)' || true; printf '[RPI] log-lines='; if [ -f '${RPI_LOG_PATH}' ]; then wc -l < '${RPI_LOG_PATH}'; else printf 'missing\\n'; fi"
+    command="printf '[RPI] hostname='; hostname; printf '[RPI] addresses='; hostname -I; date '+[RPI] time=%F %T.%3N %Z %z'; timedatectl show --property=Timezone --property=NTPSynchronized --property=NTP --value 2>/dev/null | sed 's/^/[RPI] time-status=/'; printf '[RPI] service='; systemctl is-active '${RPI_SERVICE}' 2>/dev/null || true; printf '[RPI] processes:\\n'; pgrep -af 'crsf_bridge.py|src.app|(^|/)run\.sh( |$)' || true; printf '[RPI] log-lines='; if [ -f '${RPI_LOG_PATH}' ]; then wc -l < '${RPI_LOG_PATH}'; else printf 'missing\\n'; fi"
     ssh_run "$command"
 }
 
