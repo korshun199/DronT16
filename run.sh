@@ -15,11 +15,21 @@ log() {
     printf '[DronT16] %s\n' "$1"
 }
 
+is_raspberry_pi() {
+    # Определяет Raspberry по модели платы, не по наличию произвольного Linux-файла.
+    [[ -r /proc/device-tree/model ]] && grep -qi "raspberry pi" /proc/device-tree/model
+}
+
 ensure_environment() {
     # Создаёт окружение и устанавливает зависимости только при необходимости.
     if [[ ! -x "${PYTHON_BIN}" ]]; then
         log "Создаю локальное окружение .venv"
-        python3 -m venv "${PROJECT_DIR}/.venv"
+        if is_raspberry_pi; then
+            # Picamera2/libcamera устанавливаются Raspberry Pi OS как системные пакеты.
+            python3 -m venv --system-site-packages "${PROJECT_DIR}/.venv"
+        else
+            python3 -m venv "${PROJECT_DIR}/.venv"
+        fi
     fi
 
     if ! "${PYTHON_BIN}" -c 'import cv2, flask, numpy' >/dev/null 2>&1; then
@@ -28,6 +38,14 @@ ensure_environment() {
     fi
     # Читаем только операционные флаги из единого TOML, без копий параметров в shell.
     START_RECEIVER_BRIDGE="$(${PYTHON_BIN} -c 'import tomllib, sys; print("1" if tomllib.load(open(sys.argv[1], "rb"))["runtime"]["start_receiver_bridge"] else "0")' "${PROJECT_DIR}/${CONFIG_FILE}")"
+    VIDEO_SOURCE="$(${PYTHON_BIN} -c 'import tomllib, sys; print(tomllib.load(open(sys.argv[1], "rb"))["video"]["source"])' "${PROJECT_DIR}/${CONFIG_FILE}")"
+    if is_raspberry_pi && [[ "${VIDEO_SOURCE}" == "auto" || "${VIDEO_SOURCE}" == "csi" || "${VIDEO_SOURCE}" == "picamera2" ]]; then
+        if ! "${PYTHON_BIN}" -c 'import picamera2' >/dev/null 2>&1; then
+            log "ОШИБКА: Picamera2 не видна из .venv"
+            log "Нужен пакет python3-picamera2 и окружение .venv с --system-site-packages"
+            return 2
+        fi
+    fi
 }
 
 main() {
@@ -56,7 +74,7 @@ main() {
     fi
     local output_mode="j7"
     # Автоматический выбор платформы повторяет значение video.display=auto.
-    if [[ ! -e /proc/device-tree/model ]] || ! grep -qi "raspberry pi" /proc/device-tree/model; then
+    if ! is_raspberry_pi; then
         output_mode="web"
     fi
     local -a app_args=(--config "${CONFIG_FILE}")

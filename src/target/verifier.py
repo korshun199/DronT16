@@ -125,7 +125,7 @@ class TargetVerifier:
         reference_gray = cv2.cvtColor(self._reference_frame, cv2.COLOR_BGR2GRAY)
         current_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         difference = cv2.absdiff(current_gray, reference_gray)
-        # 25 уровней подавляют шум EasyCap и небольшие изменения яркости.
+        # 25 уровней подавляют шум сенсора и небольшие изменения яркости.
         changed = (difference >= 25).astype("uint8") * 255
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         changed = cv2.morphologyEx(changed, cv2.MORPH_OPEN, kernel)

@@ -103,7 +103,31 @@ def main() -> int:
         display_name = "j7" if sys.platform.startswith("linux") and Path("/proc/device-tree/model").exists() else "web"
     if display_name not in {"hdmi", "web", "j7", "both"}:
         raise ValueError("video.display должен быть auto, hdmi, web, j7 или both")
-    source = VideoSource(source_name)
+    try:
+        source = VideoSource(
+            source_name,
+            int(video_config["camera_width"]),
+            int(video_config["camera_height"]),
+            float(video_config["camera_fps"]),
+            str(video_config["camera_pixel_format"]),
+            int(video_config["camera_index"]),
+            int(video_config["camera_buffer_count"]),
+            bool(video_config["zoom"]["enabled"]),
+            float(video_config["zoom"]["level"]),
+            float(video_config["zoom"]["center_x"]),
+            float(video_config["zoom"]["center_y"]),
+            bool(video_config["lens"]["undistort"]),
+            str(video_config["lens"]["calibration_file"]),
+            bool(video_config["image"]["flip_horizontal"]),
+            bool(video_config["image"]["flip_vertical"]),
+            int(video_config["image"]["rotate_deg"]),
+            float(video_config["image"]["contrast"]),
+            float(video_config["image"]["brightness"]),
+            float(video_config["image"]["sharpness"]),
+        )
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
+        print(f"[DronT16] Ошибка видеовхода: {error}", file=sys.stderr, flush=True)
+        return 2
     machine = TargetStateMachine()
     verifier = TargetVerifier(
         follow_config.verification.min_similarity,
@@ -134,15 +158,14 @@ def main() -> int:
             osd_config.output_offset_y, osd_config.video_standard,
         )
         print(
-            f"[DronT16] Видеотракт: EasyCap={source.describe()} | "
+            f"[DronT16] Видеотракт: камера={source.describe()} | "
             f"J7={j7_output.mode_name} ({osd_config.video_standard})",
             flush=True,
         )
-        if source.capture.get(cv2.CAP_PROP_FRAME_WIDTH) != j7_output.width or \
-                source.capture.get(cv2.CAP_PROP_FRAME_HEIGHT) != j7_output.height:
+        if source.width != j7_output.width or source.height != j7_output.height:
             print(
-                "[DronT16] ПРЕДУПРЕЖДЕНИЕ: размеры EasyCap и J7 различаются; "
-                "штатное OSD может исказиться.",
+                "[DronT16] ИНФОРМАЦИЯ: размеры камеры и J7 различаются; "
+                "кадр будет приведён к геометрии аналогового выхода.",
                 file=sys.stderr, flush=True,
             )
     if display_name in ("hdmi", "both"):

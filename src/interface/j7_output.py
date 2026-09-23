@@ -115,7 +115,7 @@ class J7Output:
         self.scale_y = scale_y
         self.offset_x = offset_x
         self.offset_y = offset_y
-        # Стандарт должен совпадать с аналоговым источником EasyCap.
+        # Стандарт определяет только физическую развёртку аналогового выхода J7.
         self.video_standard = video_standard.upper()
         if self.video_standard not in VIDEO_STANDARD_MODE_NAMES:
             raise ValueError("Видеостандарт J7 должен быть NTSC или PAL")
@@ -275,8 +275,7 @@ class J7Output:
         cv2 = self._cv2
         import numpy as np
         height, width = frame.shape[:2]
-        # При совпадающих размерах не ресемплируем кадр: тонкие символы
-        # штатного OSD MAX7456 остаются в исходных пикселях EasyCap.
+        # При совпадающих размерах не выполняем лишнее ресемплирование кадра.
         if width == self.width and height == self.height:
             target = frame
         else:
