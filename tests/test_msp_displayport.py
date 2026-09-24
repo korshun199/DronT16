@@ -2,6 +2,7 @@
 
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from src.protocols.msp_displayport import (
     MSP_DP_RELEASE,
     MSP_DP_WRITE_STRING,
     DisplayPortCanvas,
+    MspDisplayPortWorker,
 )
 from src.protocols.betaflight_msp_link import MSP_DISPLAYPORT, MspParser, msp_checksum
 
@@ -166,6 +168,36 @@ class DisplayPortCanvasTests(unittest.TestCase):
         packets = parser.drain_packets()
         self.assertEqual(len(packets), 1)
         self.assertEqual((packets[0].command, packets[0].payload), (MSP_DISPLAYPORT, payload))
+
+    def test_worker_polls_displayport_outside_crsf_thread(self) -> None:
+        """Фоновый worker обслуживает OSD и корректно закрывает выделенный UART."""
+        class FakeDisplayPortLink:
+            """Минимальная имитация UART OSD без обращения к оборудованию."""
+
+            def __init__(self) -> None:
+                self.poll_count = 0
+                self.closed = False
+
+            def poll(self) -> int:
+                self.poll_count += 1
+                return 0
+
+            def status_text(self) -> str:
+                return f"polls={self.poll_count}"
+
+            def close(self) -> None:
+                self.closed = True
+
+        link = FakeDisplayPortLink()
+        statuses: list[str] = []
+        worker = MspDisplayPortWorker(link, 0.001, statuses.append, poll_period_s=0.001)
+        worker.start()
+        time.sleep(0.01)
+        worker.stop()
+
+        self.assertGreater(link.poll_count, 0)
+        self.assertTrue(link.closed)
+        self.assertTrue(statuses)
 
 
 if __name__ == "__main__":

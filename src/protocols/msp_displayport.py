@@ -12,9 +12,12 @@ import json
 import os
 import select
 import termios
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from collections.abc import Callable
 
 from src.protocols.betaflight_msp_link import MSP_DISPLAYPORT, MspParser
 
@@ -206,3 +209,54 @@ class MspDisplayPortLink:
         if self._fd is not None:
             os.close(self._fd)
             self._fd = None
+
+
+class MspDisplayPortWorker:
+    """Обслуживает DisplayPort в отдельном потоке от критичного CRSF-цикла."""
+
+    def __init__(
+        self,
+        link: MspDisplayPortLink,
+        report_period_s: float,
+        status_callback: Callable[[str], None] | None = None,
+        poll_period_s: float = 0.002,
+    ) -> None:
+        """Сохраняет параметры фонового приёма OSD без запуска потока."""
+        if report_period_s <= 0 or poll_period_s <= 0:
+            raise ValueError("Периоды DisplayPort должны быть положительными")
+        self.link = link
+        self.report_period_s = report_period_s
+        self.status_callback = status_callback
+        self.poll_period_s = poll_period_s
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        """Запускает независимый от RC цикл чтения и сохранения OSD."""
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            name="dront16-displayport",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _run(self) -> None:
+        """Читает UART DisplayPort и не задерживает обработку CRSF."""
+        last_report = 0.0
+        while not self._stop_event.is_set():
+            self.link.poll()
+            now = time.monotonic()
+            if self.status_callback is not None and now - last_report >= self.report_period_s:
+                self.status_callback(self.link.status_text())
+                last_report = now
+            self._stop_event.wait(self.poll_period_s)
+
+    def stop(self) -> None:
+        """Останавливает поток и закрывает только UART DisplayPort."""
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+            self._thread = None
+        self.link.close()

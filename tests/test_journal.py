@@ -103,3 +103,21 @@ class EventJournalTest(unittest.TestCase):
             self.assertRegex(first.name, r"simulator_filesafe_\d{8}_\d{6}_\d{3}\.log")
             self.assertIn("first arm", first.read_text(encoding="utf-8"))
             self.assertIn("second arm", second.read_text(encoding="utf-8"))
+
+    def test_async_file_writer_flushes_before_disarm_closes_session(self) -> None:
+        """Фоновая запись не теряет события ARM-цикла при немедленном DISARM."""
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "async.log"
+            journal = EventJournal(path, "TEST", asynchronous_file_write=True)
+            journal.begin_session()
+            for number in range(100):
+                journal.write("FC", f"sensor={number}", console=False)
+            journal.end_session()
+            journal.close()
+
+            self.assertIsNotNone(journal.session_path)
+            contents = journal.session_path.read_text(encoding="utf-8")
+
+        self.assertIn("sensor=0", contents)
+        self.assertIn("sensor=99", contents)
+        self.assertEqual(journal.dropped_file_events, 0)

@@ -33,3 +33,30 @@ config/dront16.toml
         ├── simulation.*
         └── logging, runtime
 ```
+# Скрипты DronT16
+
+## Анализ CRSF-записи PulseView
+
+`analyze_crsf_capture.py` разбирает сохранённую сессию PulseView `.sr` без
+подключения к Raspberry. Он отдельно декодирует вход CRSF от приёмника и
+выход CRSF Raspberry, проверяет CRC, распаковывает CH1–CH16 и сравнивает
+переходы CH5 между `ARM` и `DISARM`.
+
+Запуск для входа на D6 и выхода на D5:
+
+```bash
+python3 scripts/analyze_crsf_capture.py docs/000.sr --input-channel 6 --output-channel 5
+```
+
+Полный снимок каналов при каждом изменении CH5:
+
+```bash
+python3 scripts/analyze_crsf_capture.py docs/000.sr --input-channel 6 --output-channel 5 --channels
+```
+
+Если анализатор подключён к другим входам PulseView, номера можно изменить.
+Например, вход на D6 и выход на D7:
+
+```bash
+python3 scripts/analyze_crsf_capture.py docs/000.sr --input-channel 6 --output-channel 7
+```

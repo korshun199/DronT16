@@ -32,7 +32,7 @@ from src.receiver.crsf import (
 from src.receiver.mode import ModeThresholds, ReceiverModeDecoder
 from src.receiver.takeover import TakeoverConfig, TakeoverController, TakeoverState
 from src.protocols.betaflight_msp_link import BetaflightMspLink, SensorSample, msp_command_name
-from src.protocols.msp_displayport import DisplayPortCanvas, MspDisplayPortLink
+from src.protocols.msp_displayport import DisplayPortCanvas, MspDisplayPortLink, MspDisplayPortWorker
 
 
 def load_config() -> dict[str, int | str]:
@@ -206,9 +206,13 @@ def main() -> int:
         file_enabled=bool(logging_config.get("file_enabled", True)),
         console_categories=console_categories,
         file_categories=file_categories,
+        # Полная телеметрия идёт в очередь: запись на SD-карту не имеет права
+        # задерживать выдачу очередного CRSF-кадра на UART0.
+        asynchronous_file_write=True,
     )
     msp_link: BetaflightMspLink | None = None
     displayport_link: MspDisplayPortLink | None = None
+    displayport_worker: MspDisplayPortWorker | None = None
     failsafe: FailsafeController | None = None
     visual_servo: VisualServoController | None = None
     latest_sensor: SensorSample | None = None
@@ -218,7 +222,6 @@ def main() -> int:
     last_pilot_log = 0.0
     last_pilot_action_values: tuple[int, ...] | None = None
     last_rc_interval_ms: float | None = None
-    last_displayport_report = 0.0
 
     # До первого свежего кадра считаем терминальный диагностический вывод неактивным.
     try:
@@ -287,6 +290,14 @@ def main() -> int:
             displayport_link = MspDisplayPortLink(
                 displayport_port, displayport_baudrate, displayport_canvas, displayport_state_file
             )
+            displayport_worker = MspDisplayPortWorker(
+                displayport_link,
+                displayport_report_period_s,
+                status_callback=lambda status: print(
+                    f"[DronT16] OSD UART {displayport_port}: {status}", flush=True
+                ),
+            )
+            displayport_worker.start()
             journal.write(
                 "RPI",
                 f"OSD DISPLAYPORT: UART={displayport_port} {displayport_baudrate} бод; "
@@ -399,24 +410,6 @@ def main() -> int:
     try:
         with CrsfReceiver(serial_port, baudrate, write_enabled=True) as bridge_uart:
             while True:
-                if displayport_link is not None:
-                    completed_osd_frames = displayport_link.poll()
-                    if completed_osd_frames:
-                        journal.write(
-                            "FC",
-                            f"OSD DISPLAYPORT FRAME={displayport_canvas.frame_counter}",
-                            Color.CYAN,
-                            console=False,
-                        )
-                    displayport_now = time.monotonic()
-                    if displayport_now - last_displayport_report >= displayport_report_period_s:
-                        # Отдельная строка journalctl не зависит от фильтров
-                        # диагностического журнала и показывает физическую линию.
-                        print(
-                            f"[DronT16] OSD UART {displayport_port}: {displayport_link.status_text()}",
-                            flush=True,
-                        )
-                        last_displayport_report = displayport_now
                 if msp_link is not None:
                     for sample in msp_link.poll():
                         latest_sensor = sample
@@ -758,7 +751,9 @@ def main() -> int:
     finally:
         if msp_link is not None:
             msp_link.close()
-        if displayport_link is not None:
+        if displayport_worker is not None:
+            displayport_worker.stop()
+        elif displayport_link is not None:
             displayport_link.close()
         journal.close()
 
