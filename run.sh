@@ -38,7 +38,7 @@ ensure_environment() {
     fi
     # Читаем только операционные флаги из единого TOML, без копий параметров в shell.
     START_RECEIVER_BRIDGE="$(${PYTHON_BIN} -c 'import tomllib, sys; print("1" if tomllib.load(open(sys.argv[1], "rb"))["runtime"]["start_receiver_bridge"] else "0")' "${PROJECT_DIR}/${CONFIG_FILE}")"
-    VIDEO_SOURCE="$(${PYTHON_BIN} -c 'import tomllib, sys; print(tomllib.load(open(sys.argv[1], "rb"))["video"]["source"])' "${PROJECT_DIR}/${CONFIG_FILE}")"
+    VIDEO_SOURCE="$(${PYTHON_BIN} -c 'import tomllib, sys; print(tomllib.load(open(sys.argv[1], "rb"))["camera"]["source"])' "${PROJECT_DIR}/${CONFIG_FILE}")"
     if is_raspberry_pi && [[ "${VIDEO_SOURCE}" == "auto" || "${VIDEO_SOURCE}" == "csi" || "${VIDEO_SOURCE}" == "picamera2" ]]; then
         if ! "${PYTHON_BIN}" -c 'import picamera2' >/dev/null 2>&1; then
             log "ОШИБКА: Picamera2 не видна из .venv"

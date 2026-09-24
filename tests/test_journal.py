@@ -25,9 +25,11 @@ class EventJournalTest(unittest.TestCase):
             journal.write("RPI", "after disarm", console=False)
             journal.close()
 
-            contents = path.read_text(encoding="utf-8")
+            self.assertIsNotNone(journal.session_path)
+            contents = journal.session_path.read_text(encoding="utf-8")
 
-        self.assertIn("ARM", contents)
+            self.assertIn("ARM", contents)
+            self.assertIn("ARM session started", contents)
         self.assertIn("sensor", contents)
         self.assertNotIn("before arm", contents)
         self.assertNotIn("after disarm", contents)
@@ -51,7 +53,8 @@ class EventJournalTest(unittest.TestCase):
                 journal.close()
 
             console = output.getvalue()
-            contents = path.read_text(encoding="utf-8")
+            self.assertIsNotNone(journal.session_path)
+            contents = journal.session_path.read_text(encoding="utf-8")
 
         self.assertIn("rpi visible", console)
         self.assertNotIn("pilot hidden", console)
@@ -72,8 +75,31 @@ class EventJournalTest(unittest.TestCase):
             journal.write("RPI", "after fault", console=False)
             journal.close()
 
-            contents = path.read_text(encoding="utf-8")
+            self.assertIsNotNone(journal.session_path)
+            contents = journal.session_path.read_text(encoding="utf-8")
 
         self.assertIn("before fault", contents)
         self.assertIn("SESSION END: FAULT", contents)
         self.assertNotIn("after fault", contents)
+
+    def test_each_arm_session_gets_a_unique_timestamped_file(self) -> None:
+        """Каждый ARM-цикл сохраняется отдельным неперезаписываемым файлом."""
+        with TemporaryDirectory() as directory:
+            base = Path(directory) / "simulator_filesafe.log"
+            journal = EventJournal(base, "TEST")
+            journal.begin_session()
+            first = journal.session_path
+            journal.write("PILOT", "first arm", console=False)
+            journal.end_session()
+            journal.begin_session()
+            second = journal.session_path
+            journal.write("PILOT", "second arm", console=False)
+            journal.end_session()
+            journal.close()
+
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(second)
+            self.assertNotEqual(first, second)
+            self.assertRegex(first.name, r"simulator_filesafe_\d{8}_\d{6}_\d{3}\.log")
+            self.assertIn("first arm", first.read_text(encoding="utf-8"))
+            self.assertIn("second arm", second.read_text(encoding="utf-8"))

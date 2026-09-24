@@ -3,21 +3,6 @@
 # Секреты, IP Raspberry и SSH-пути находятся отдельно в deployment.toml.
 
 [video]
-# Источник камеры: auto выбирает CSI/Picamera2 на Raspberry и OpenCV на ноутбуке.
-# Значение csi принудительно включает Picamera2, путь или индекс включает OpenCV.
-source = "auto"
-# Рабочая ширина кадра; режим OV5647 с повышенной детализацией.
-camera_width = 1296
-# Рабочая высота кадра для режима OV5647 1296x972.
-camera_height = 972
-# Частота CSI-камеры; фактический режим сенсора даёт около 46.3 кадра/с.
-camera_fps = 46.3
-# RGB888 Picamera2 в массиве NumPy расположен как B,G,R и совместим с OpenCV.
-camera_pixel_format = "RGB888"
-# Номер CSI-камеры Picamera2; для единственной камеры используется 0.
-camera_index = 0
-# Число буферов Picamera2; меньше 2 недопустимо для видеоконфигурации.
-camera_buffer_count = 4
 # Режим вывода: auto выбирает J7 на Raspberry и web на ноутбуке.
 display = "auto"
 # Адрес и порт диагностического веб-просмотра.
@@ -30,8 +15,33 @@ j7_device = "/dev/dri/by-path/platform-1f00144000.vec-card"
 # Файл программной команды для тестового SSH-пульта.
 control_file = "/tmp/dront16_command"
 
+# Параметры цифровой камеры. Их редактирует ручной веб-интерфейс ./camera.sh.
+[camera]
+# Источник: auto выбирает CSI/Picamera2 на Raspberry и OpenCV на ноутбуке.
+# Значение csi принудительно включает Picamera2, путь или индекс включает OpenCV.
+source = "auto"
+# Рабочая ширина кадра; режим OV5647 с повышенной детализацией.
+width = 1296
+# Рабочая высота кадра для режима OV5647 1296x972.
+height = 972
+# Частота CSI-камеры; фактический режим сенсора даёт около 46.3 кадра/с.
+fps = 46.3
+# RGB888 Picamera2 в массиве NumPy расположен как B,G,R и совместим с OpenCV.
+pixel_format = "RGB888"
+# Номер CSI-камеры Picamera2; для единственной камеры используется 0.
+index = 0
+# Число буферов Picamera2; меньше 2 недопустимо для видеоконфигурации.
+buffer_count = 4
+
+[camera.web]
+# Адрес ручного веб-интерфейса настройки камеры. 0.0.0.0 открывает его только
+# в доступной локальной сети Raspberry; сервис не входит в автозагрузку.
+host = "0.0.0.0"
+# Отдельный непривилегированный порт: не требует sudo и не занят видеопросмотром.
+port = 8090
+
 # Цифровое приближение выключено: уровень 1.0 сохраняет весь кадр.
-[video.zoom]
+[camera.zoom]
 # Включать crop и увеличение центральной области кадра.
 enabled = false
 # Коэффициент цифрового приближения; 2.0 оставляет половину ширины и высоты.
@@ -41,13 +51,13 @@ center_x = 0.5
 # Вертикальный центр zoom в долях высоты кадра.
 center_y = 0.5
 
-[video.lens]
+[camera.lens]
 # Коррекция дисторсии объектива после калибровки шахматной таблицей.
 undistort = false
 # NPZ-файл с camera_matrix и dist_coeffs, не создаётся автоматически.
 calibration_file = "config/ov5647_calibration.npz"
 
-[video.image]
+[camera.image]
 # Отражение изображения по горизонтали.
 flip_horizontal = false
 # Отражение изображения по вертикали.
@@ -168,9 +178,10 @@ target_max_age_ms = 300
 [visual_servoing]
 # Внешний контур рассчитывается вместе с рабочим мостом.
 enabled = true
-# На ноутбуке и первом стенде кадр FC не изменяется: выводятся только расчёты.
-# После проверки знаков, ANGLE и снятых винтов значение меняется на "real".
-output_mode = "dry-run"
+# Стендовый real: Raspberry заменяет только CH1–CH4 в CRSF-кадре при FOLLOW.
+# Включать только при снятых винтах; DISARM, watchdog и возврат к пилоту остаются
+# обязательными защитами моста.
+output_mode = "real"
 # Период внешнего расчёта 50 мс соответствует частоте 20 Гц.
 control_period_ms = 50
 # Каналы Betaflight: CH1 roll, CH2 pitch, CH3 throttle, CH4 yaw.
@@ -282,6 +293,7 @@ sensor_log_every_packet = true
 sensor_log_period_ms = 100
 control_file = "/tmp/dront16_command"
 simulator_control_file = "/tmp/simulator_filesafe_command"
+# Базовое имя; каждый ARM-цикл получает отдельный файл с датой и временем.
 log_file = "simulator_filesafe.log"
 pilot_log_period_ms = 500
 command_log_period_ms = 100

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sys
+import signal
 import time
 from pathlib import Path
 
@@ -86,6 +87,13 @@ def category_set(value: object) -> set[str] | None:
 def main() -> int:
     """Передаёт RC, повторяет последний кадр при CH7 и даёт приоритет DISARM."""
     config = load_config()
+    # systemd останавливает службу сигналом SIGTERM; переводим его в общий
+    # путь завершения, чтобы текущий ARM-журнал успел fsync и закрылся.
+    def stop_on_term(_signum: int, _frame: object) -> None:
+        """Передаёт SIGTERM в общий обработчик корректной остановки моста."""
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop_on_term)
     control = load_takeover_config()
     msp_config, failsafe_config = load_bridge_sections()
     target_config = load_target_control_config()

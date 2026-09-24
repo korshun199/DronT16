@@ -167,11 +167,11 @@ class VideoCaptureTests(unittest.TestCase):
         self.assertEqual(frame.shape, (480, 640, 3))
         source.close()
 
-    def test_nested_video_sections_are_available(self) -> None:
+    def test_nested_camera_sections_are_available(self) -> None:
         """Общие настройки zoom, объектива и изображения читаются из TOML."""
         from src.configuration import load_config_section
 
-        config = load_config_section("config/dront16.toml", "video")
+        config = load_config_section("config/dront16.toml", "camera")
         self.assertEqual(config["zoom"]["level"], 1.0)
         self.assertFalse(config["lens"]["undistort"])
         self.assertEqual(config["image"]["rotate_deg"], 0)

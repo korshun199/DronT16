@@ -85,6 +85,7 @@ def main() -> int:
     args = parse_args()
     try:
         video_config = load_config_section(args.config, "video")
+        camera_config = load_config_section(args.config, "camera")
         follow_config = load_follow_config(args.follow_config or args.config)
         osd_config = load_osd_config(args.osd_config or args.config)
         betaflight_osd_config = load_betaflight_osd_config(
@@ -93,7 +94,7 @@ def main() -> int:
     except ValueError as error:
         print(f"[DronT16] Ошибка конфигурации сопровождения: {error}", file=sys.stderr)
         return 2
-    source_name = str(args.source or video_config["source"])
+    source_name = str(args.source or camera_config["source"])
     display_name = str(args.display or video_config["display"])
     web_host = str(args.web_host or video_config["web_host"])
     web_port = int(args.web_port or video_config["web_port"])
@@ -110,24 +111,24 @@ def main() -> int:
     try:
         source = VideoSource(
             source_name,
-            int(video_config["camera_width"]),
-            int(video_config["camera_height"]),
-            float(video_config["camera_fps"]),
-            str(video_config["camera_pixel_format"]),
-            int(video_config["camera_index"]),
-            int(video_config["camera_buffer_count"]),
-            bool(video_config["zoom"]["enabled"]),
-            float(video_config["zoom"]["level"]),
-            float(video_config["zoom"]["center_x"]),
-            float(video_config["zoom"]["center_y"]),
-            bool(video_config["lens"]["undistort"]),
-            str(video_config["lens"]["calibration_file"]),
-            bool(video_config["image"]["flip_horizontal"]),
-            bool(video_config["image"]["flip_vertical"]),
-            int(video_config["image"]["rotate_deg"]),
-            float(video_config["image"]["contrast"]),
-            float(video_config["image"]["brightness"]),
-            float(video_config["image"]["sharpness"]),
+            int(camera_config["width"]),
+            int(camera_config["height"]),
+            float(camera_config["fps"]),
+            str(camera_config["pixel_format"]),
+            int(camera_config["index"]),
+            int(camera_config["buffer_count"]),
+            bool(camera_config["zoom"]["enabled"]),
+            float(camera_config["zoom"]["level"]),
+            float(camera_config["zoom"]["center_x"]),
+            float(camera_config["zoom"]["center_y"]),
+            bool(camera_config["lens"]["undistort"]),
+            str(camera_config["lens"]["calibration_file"]),
+            bool(camera_config["image"]["flip_horizontal"]),
+            bool(camera_config["image"]["flip_vertical"]),
+            int(camera_config["image"]["rotate_deg"]),
+            float(camera_config["image"]["contrast"]),
+            float(camera_config["image"]["brightness"]),
+            float(camera_config["image"]["sharpness"]),
         )
     except (ImportError, OSError, RuntimeError, ValueError) as error:
         print(f"[DronT16] Ошибка видеовхода: {error}", file=sys.stderr, flush=True)

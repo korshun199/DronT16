@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import time
+import os
 from datetime import datetime
 from pathlib import Path
+from typing import TextIO
 
 
 class Color:
@@ -42,19 +44,55 @@ class EventJournal:
         self.file_enabled = file_enabled
         self.console_categories = console_categories
         self.file_categories = file_categories
-        # Файл испытания активируется только после ARM и закрывается после DISARM.
+        # Базовый путь используется как шаблон; отдельный файл создаётся при ARM.
         self.session_active = False
-        self.file = path.open("a", encoding="utf-8", buffering=1)
+        self.file: TextIO | None = None
+        self.session_path: Path | None = None
+        self.last_sync = 0.0
 
     def begin_session(self) -> None:
-        """Начинает запись нового ARM-цикла, сохраняя предыдущие циклы."""
+        """Создаёт отдельный файл нового ARM-цикла с датой и временем."""
+        if self.session_active:
+            self.end_session()
+        now = datetime.now().astimezone()
+        suffix = now.strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        candidate = self.path.with_name(f"{self.path.stem}_{suffix}{self.path.suffix}")
+        counter = 1
+        while candidate.exists():
+            candidate = self.path.with_name(
+                f"{self.path.stem}_{suffix}_{counter:02d}{self.path.suffix}"
+            )
+            counter += 1
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        self.session_path = candidate
+        self.file = candidate.open("x", encoding="utf-8", buffering=1)
+        self.file.write(
+            f"# ARM session started: {now.astimezone().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}\n"
+        )
+        self._sync_file(force=True)
         self.session_active = True
         self.start_time = time.monotonic()
         self.sequence = 0
+        self.last_sync = self.start_time
 
     def end_session(self) -> None:
-        """Завершает запись ARM-цикла, не удаляя его из файла."""
+        """Завершает и закрывает текущий файл ARM-цикла."""
         self.session_active = False
+        if self.file is not None:
+            self._sync_file(force=True)
+            self.file.close()
+            self.file = None
+
+    def _sync_file(self, *, force: bool = False) -> None:
+        """Синхронизирует журнал с файловой системой не реже двух раз в секунду."""
+        if self.file is None:
+            return
+        now = time.monotonic()
+        if not force and now - self.last_sync < 0.5:
+            return
+        self.file.flush()
+        os.fsync(self.file.fileno())
+        self.last_sync = now
 
     def write(
         self,
@@ -89,10 +127,10 @@ class EventJournal:
         if show_console:
             print(f"{color}{plain}{Color.RESET}", flush=True)
         # До ARM сообщения не попадают в файл испытания, но могут быть видны в консоли.
-        if write_file:
+        if write_file and self.file is not None:
             self.file.write(plain + "\n")
-            self.file.flush()
+            self._sync_file()
 
     def close(self) -> None:
         """Закрывает файл общего журнала."""
-        self.file.close()
+        self.end_session()

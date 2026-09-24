@@ -7,7 +7,14 @@ from pathlib import Path
 
 import numpy as np
 
-from src.interface.betaflight_font import glyph_mask
+from src.interface.betaflight_font import (
+    FONT_STYLE,
+    FONT_SYMBOLS,
+    glyph_mask,
+    horizon_decoration_glyph_mask,
+    horizon_glyph_mask,
+    horizon_sidebar_glyph_mask,
+)
 from src.interface.betaflight_osd import BetaflightOsdConfig, draw_betaflight_osd
 from src.protocols.msp_displayport import (
     MSP_DP_CLEAR_SCREEN,
@@ -85,6 +92,49 @@ class DisplayPortCanvasTests(unittest.TestCase):
         glyph_a = glyph_mask(65)
         self.assertEqual(int(glyph_a[4, 5]), 255)
         self.assertEqual(int(glyph_a[4, 0]), 0)
+
+    def test_horizon_glyph_uses_dashed_horizontal_segment(self) -> None:
+        """Искусственный горизонт на J7 состоит только из черточек."""
+        standard = glyph_mask(0x84)
+        dashed = horizon_glyph_mask(0x84)
+        row_index = int(np.flatnonzero(dashed.any(axis=1))[0])
+        self.assertEqual(int(dashed.sum()), 6 * 255)
+        self.assertEqual(int(dashed[row_index, 5]), 0)
+        self.assertEqual(int(dashed[row_index, 2]), 255)
+
+    def test_horizon_sidebar_uses_separated_ticks(self) -> None:
+        """Боковые шкалы горизонта рисуются двойными стрелками."""
+        left = horizon_sidebar_glyph_mask(0x03)
+        right = horizon_sidebar_glyph_mask(0x02)
+        self.assertEqual(int(left.sum()), 10 * 255)
+        self.assertEqual(int(right.sum()), 10 * 255)
+        self.assertEqual(int(left[7, 11]), 255)
+        self.assertEqual(int(left[7, 0]), 0)
+        self.assertEqual(int(right[7, 0]), 255)
+        self.assertEqual(int(right[7, 11]), 0)
+
+    def test_horizon_decoration_is_a_toggleable_dash(self) -> None:
+        """Глиф 0x13 боковой панели становится отдельной черточкой."""
+        decoration = horizon_decoration_glyph_mask()
+        expected = 6 * 255 if FONT_STYLE["sidebar_limit_enabled"] else 0
+        self.assertEqual(int(decoration.sum()), expected)
+        if FONT_STYLE["sidebar_limit_enabled"]:
+            self.assertEqual(int(decoration[8, 5]), 255)
+
+    def test_horizon_symbols_are_explicitly_configurable(self) -> None:
+        """В коде есть отдельные ручные переменные только для символов."""
+        self.assertEqual(FONT_SYMBOLS["left_arrow"], ">>")
+        self.assertEqual(FONT_SYMBOLS["right_arrow"], "<<")
+        self.assertEqual(FONT_SYMBOLS["horizon_line"], "--")
+        self.assertEqual(FONT_SYMBOLS["sidebar_limit"], "-")
+
+    def test_font_style_parameters_are_available(self) -> None:
+        """Размер, начертание, монохромность и яркость задаются отдельно."""
+        self.assertGreater(FONT_STYLE["size"], 0.0)
+        self.assertEqual(FONT_STYLE["type"], "clean")
+        self.assertTrue(FONT_STYLE["monochrome"])
+        self.assertEqual(FONT_STYLE["brightness"], 1.0)
+        self.assertIsInstance(FONT_STYLE["sidebar_limit_enabled"], bool)
 
     def test_renderer_keeps_ascii_text_clean_and_special_symbols_pixel_based(self) -> None:
         """Текст читается ровно, а специальные иконки не превращаются в квадрат."""

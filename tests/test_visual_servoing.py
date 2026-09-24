@@ -254,8 +254,8 @@ class VisualServoTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             VisualServoController(invalid)
 
-    def test_project_toml_builds_working_dry_run_controller(self) -> None:
-        """Единый рабочий TOML содержит полный и безопасный набор параметров."""
+    def test_project_toml_builds_working_real_controller(self) -> None:
+        """Единый TOML содержит полный стендовый real-контур."""
         visual_section = load_config_section("config/dront16.toml", "visual_servoing")
         target_section = load_config_section("config/dront16.toml", "follow", "control")
         msp_section = load_config_section("config/dront16.toml", "msp")
@@ -265,7 +265,7 @@ class VisualServoTests(unittest.TestCase):
             sensor_max_age_s=int(msp_section["sensor_max_age_ms"]) / 1000.0,
         )
         self.assertTrue(loaded.enabled)
-        self.assertEqual(loaded.output_mode, "dry-run")
+        self.assertEqual(loaded.output_mode, "real")
         self.assertAlmostEqual(loaded.control_period_s, 0.05)
 
 

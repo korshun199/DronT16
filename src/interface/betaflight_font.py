@@ -19,6 +19,33 @@ GLYPH_WIDTH = 12
 GLYPH_HEIGHT = 18
 GLYPH_BYTES = 54
 
+# Девять штатных глифов искусственного горизонта Betaflight. Их центральный
+# сегмент на J7 выводим короткими черточками, чтобы линия не сливалась.
+HORIZON_GLYPH_CODES = frozenset(range(0x80, 0x89))
+# Глифы боковых шкал искусственного горизонта: SYM_AH_RIGHT и SYM_AH_LEFT.
+HORIZON_SIDEBAR_GLYPH_CODES = frozenset((0x02, 0x03))
+# Глиф боковой вертикальной линии: SYM_AH_DECORATION.
+HORIZON_DECORATION_GLYPH_CODE = 0x13
+
+# Ручная настройка символов OSD. Менять можно только значения справа от '='.
+# Поддерживаемые значения стрелок: "<<" и ">>"; линий: "-" и "--".
+FONT_SYMBOLS = {
+    "left_arrow": ">>",
+    "right_arrow": "<<",
+    "horizon_line": "--",
+    "sidebar_limit": "-",
+}
+
+# Ручные параметры внешнего вида шрифта. Менять можно только значения справа.
+# type: "clean", "plain" или "bold"; brightness: 0.0..1.0.
+FONT_STYLE = {
+    "size": 0.8,
+    "type": "clean",
+    "monochrome": True,
+    "brightness": 1.0,
+    "sidebar_limit_enabled": True,
+}
+
 # Сжатый исходный набор из 256 глифов. Храним в коде, чтобы Raspberry работала
 # автономно, без сети и без необходимости устанавливать Betaflight Configurator.
 _FONT_B64 = (
@@ -47,4 +74,53 @@ def glyph_mask(code: int) -> np.ndarray:
                 value = (byte >> (pixel_in_byte * 2)) & 0x03
                 if value == 2:
                     mask[row, byte_index * 4 + pixel_in_byte] = 255
+    return mask
+
+
+@lru_cache(maxsize=16)
+def horizon_glyph_mask(code: int) -> np.ndarray:
+    """Возвращает глиф горизонта с разрывом сплошного сегмента на черточки."""
+    standard = glyph_mask(code)
+    mask = np.zeros_like(standard)
+    if code not in HORIZON_GLYPH_CODES:
+        return standard.copy()
+    # Высота линии уже закодирована в варианте глифа. Сохраняем её, но
+    # отбрасываем боковые части штатной дуги, которые превращали линию в "()".
+    active_rows = np.flatnonzero(standard.any(axis=1))
+    center_row = int(round(float(active_rows.mean())))
+    # Символ линии меняется только в блоке FONT_SYMBOLS выше.
+    if FONT_SYMBOLS["horizon_line"] == "-":
+        mask[center_row, 3:9] = 255
+    else:
+        mask[center_row, 2:5] = 255
+        mask[center_row, 7:10] = 255
+    return mask
+
+
+@lru_cache(maxsize=4)
+def horizon_sidebar_glyph_mask(code: int) -> np.ndarray:
+    """Возвращает стрелку и разорванную боковую направляющую горизонта."""
+    standard = glyph_mask(code)
+    if code not in HORIZON_SIDEBAR_GLYPH_CODES:
+        return standard.copy()
+    mask = np.zeros_like(standard)
+    # Сохраняем направление боковой шкалы, но заменяем круглую скобку стрелкой.
+    arrow = FONT_SYMBOLS["left_arrow"] if code == 0x03 else FONT_SYMBOLS["right_arrow"]
+    if arrow == ">>":
+        points = ((5, (6, 9)), (6, (7, 10)), (7, (8, 11)),
+                  (8, (7, 10)), (9, (6, 9)))
+    else:
+        points = ((5, (2, 5)), (6, (1, 4)), (7, (0, 3)),
+                  (8, (1, 4)), (9, (2, 5)))
+    for row_index, columns in points:
+        mask[row_index, list(columns)] = 255
+    return mask
+
+
+@lru_cache(maxsize=1)
+def horizon_decoration_glyph_mask() -> np.ndarray:
+    """Возвращает вертикальную боковую линию как отдельный ряд символов ``-``."""
+    mask = np.zeros((GLYPH_HEIGHT, GLYPH_WIDTH), dtype=np.uint8)
+    if FONT_STYLE["sidebar_limit_enabled"] and FONT_SYMBOLS["sidebar_limit"] == "-":
+        mask[8, 3:9] = 255
     return mask

@@ -326,11 +326,11 @@ class VideoSource:
     ) -> None:
         """Выбирает backend по платформе и проверяет параметры видеопотока."""
         if width <= 0 or height <= 0 or fps <= 0:
-            raise ValueError("Размеры камеры и camera_fps должны быть больше нуля")
+            raise ValueError("camera.width, camera.height и camera.fps должны быть больше нуля")
         if buffer_count < 2:
-            raise ValueError("camera_buffer_count должен быть не меньше 2")
+            raise ValueError("camera.buffer_count должен быть не меньше 2")
         if pixel_format not in {"RGB888", "BGR888"}:
-            raise ValueError("camera_pixel_format должен быть RGB888 или BGR888")
+            raise ValueError("camera.pixel_format должен быть RGB888 или BGR888")
         # Проверяем постпроцессор до открытия железа, чтобы ошибка конфигурации
         # не оставляла захватчик камеры занятым.
         self._processor = _FrameProcessor(
