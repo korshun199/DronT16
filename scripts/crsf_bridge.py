@@ -105,6 +105,9 @@ def main() -> int:
     failsafe_mode = str(failsafe_config.get("mode", "CH7")).upper()
     if failsafe_mode not in {"CH7", "REAL"}:
         raise ValueError("failsafe.mode должен быть CH7 или real")
+    # Когда модуль Raspberry выключен, потеря RC должна дойти до Betaflight
+    # без заморозки кадра: FC тогда запускает свой резервный AUTO-LAND.
+    rpi_failsafe_enabled = bool(failsafe_config.get("enabled", False))
     serial_port = str(receiver_config["serial_port"])
     baudrate = int(receiver_config["baudrate"])
     frame_type = int(config["forward_frame_type"])
@@ -222,6 +225,7 @@ def main() -> int:
     last_pilot_log = 0.0
     last_pilot_action_values: tuple[int, ...] | None = None
     last_rc_interval_ms: float | None = None
+    rpi_timeout_reported = False
 
     # До первого свежего кадра считаем терминальный диагностический вывод неактивным.
     try:
@@ -389,7 +393,8 @@ def main() -> int:
     journal.write(
         "RPI",
         f"CONFIG: CH{loss_channel + 1}=LINK_LOST CH{disarm_channel + 1}=DISARM "
-        f"ARM>={arm_active_min} DISARM<={disarm_active_max} FAILSAFE_MODE={failsafe_mode}",
+        f"ARM>={arm_active_min} DISARM<={disarm_active_max} "
+        f"FAILSAFE_MODE={failsafe_mode} RPI_FAILSAFE={'ON' if rpi_failsafe_enabled else 'OFF'}",
         Color.CYAN,
     )
     journal.write("RPI", "PORT: RX CRSF -> bridge -> FC UART1; реальные RC-кадры изменяются только для DISARM", Color.BLUE)
@@ -512,13 +517,17 @@ def main() -> int:
                         if target_mode_active:
                             journal.write("RPI", "VISUAL_SERVO: запрошен режим FOLLOW", Color.YELLOW)
 
-                    # В REAL CH7 игнорируется: takeover начинается только по тайм-ауту входных кадров.
+                    # В режиме real, а также при отключённом failsafe Raspberry,
+                    # CH7 не может заморозить живой канал RC.
                     result = takeover.process(
                         frame,
                         channels,
                         now,
-                        force_link_lost=False if failsafe_mode == "REAL" else None,
+                        force_link_lost=(
+                            False if not rpi_failsafe_enabled or failsafe_mode == "REAL" else None
+                        ),
                     )
+                    rpi_timeout_reported = False
                     log_controller_events(result.events, now)
                     if result.link_lost != last_link_lost:
                         journal.write(
@@ -673,7 +682,18 @@ def main() -> int:
                 if not rc_frame_seen:
                     timeout_now = time.monotonic()
                     receiver_timed_out = bool(last_rc_time and timeout_now - last_rc_time >= timeout_s)
-                    if failsafe_mode == "REAL" and receiver_timed_out:
+                    if receiver_timed_out and not rpi_failsafe_enabled:
+                        # Не посылаем синтетический кадр: Betaflight обязан увидеть
+                        # настоящий RX LOSS и выполнить собственный AUTO-LAND.
+                        if not rpi_timeout_reported:
+                            journal.write(
+                                "RPI",
+                                "CRSF TIMEOUT: RPI failsafe OFF; передача остановлена, "
+                                "FC выполняет собственный RX LOSS/AUTO-LAND",
+                                Color.RED,
+                            )
+                            rpi_timeout_reported = True
+                    elif failsafe_mode == "REAL" and receiver_timed_out:
                         timeout_result = takeover.process_receiver_timeout(timeout_now)
                         if timeout_result is not None and timeout_result.state is TakeoverState.TAKEOVER:
                             journal.write("PILOT", "CRSF TIMEOUT: реальная потеря связи; включён TAKEOVER", Color.YELLOW)
