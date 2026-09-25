@@ -44,6 +44,7 @@ class VisualServoConfig:
     rc_max: int
     target_max_age_s: float
     sensor_max_age_s: float
+    sensor_fault_confirmations: int
     control_period_s: float
     min_scale_percent: float
     yaw_deadband: float
@@ -91,6 +92,8 @@ class VisualServoConfig:
             raise ValueError("Неверные границы CRSF visual_servoing")
         if self.target_max_age_s <= 0 or self.sensor_max_age_s <= 0 or self.control_period_s <= 0:
             raise ValueError("Возраст координат и датчиков должен быть положительным")
+        if self.sensor_fault_confirmations < 1:
+            raise ValueError("Число подтверждений устаревших MSP-данных должно быть положительным")
         if self.min_scale_percent <= 0 or self.yaw_stable_frames < 1:
             raise ValueError("Неверный минимальный масштаб или число стабильных кадров")
         if not 0 < self.derivative_alpha <= 1 or not 0 < self.hover_learning_alpha <= 1:
@@ -124,6 +127,7 @@ def build_visual_servo_config(
         rc_max=int(section["rc_max"]),
         target_max_age_s=target_max_age_s,
         sensor_max_age_s=sensor_max_age_s,
+        sensor_fault_confirmations=int(section["sensor_fault_confirmations"]),
         control_period_s=int(section["control_period_ms"]) / 1000.0,
         min_scale_percent=float(section["min_scale_percent"]),
         yaw_deadband=float(section["yaw_deadband"]),
@@ -201,6 +205,10 @@ class VisualServoController:
         self.last_control_values: tuple[int, int, int, int] | None = None
         self._fault_latched = False
         self._target_lost_latched = False
+        self._sensor_stale_count = 0
+        # Нельзя считать несколько кадров очереди за одну ошибку MSP: новое
+        # подтверждение устаревания разрешено только раз за период контура.
+        self._last_sensor_stale_check_at: float | None = None
 
     def process(
         self,
@@ -249,17 +257,63 @@ class VisualServoController:
                 False,
                 target_lost=True,
             )
+        sensor_age = self._sensor_age(sensor, now)
         if sensor is None or not sensor.is_fresh(now, cfg.sensor_max_age_s):
+            confirmation_due = (
+                self._last_sensor_stale_check_at is None
+                or now - self._last_sensor_stale_check_at >= cfg.control_period_s
+            )
+            if confirmation_due:
+                self._sensor_stale_count += 1
+                self._last_sensor_stale_check_at = now
+            age_text = "нет" if math.isinf(sensor_age) else f"{sensor_age:.3f}s"
+            if self._sensor_stale_count < cfg.sensor_fault_confirmations:
+                events = ()
+                if confirmation_due:
+                    events = (
+                        f"MSP DATA DELAY: age={age_text} "
+                        f"confirmation={self._sensor_stale_count}/{cfg.sensor_fault_confirmations}; "
+                        "сохраняется последняя команда",
+                    )
+                if self.last_control_values is None:
+                    return VisualServoResult(frame, self.state, events, live_channels, False)
+                repeated_channels = list(live_channels)
+                for channel, value in zip(
+                    (cfg.roll_channel, cfg.pitch_channel, cfg.throttle_channel, cfg.yaw_channel),
+                    self.last_control_values,
+                ):
+                    repeated_channels[channel] = value
+                computed_channels = tuple(repeated_channels)
+                output_applied = cfg.output_mode == "real"
+                output_frame = rebuild_rc_frame(frame, computed_channels) if output_applied else frame
+                return VisualServoResult(
+                    output_frame,
+                    self.state,
+                    events,
+                    computed_channels,
+                    output_applied,
+                )
             self.state = VisualServoState.FAULT
             self._fault_latched = True
             return VisualServoResult(
                 frame,
                 self.state,
-                ("FAULT: обязательные MSP-датчики отсутствуют или устарели",),
+                (
+                    f"FAULT: обязательные MSP-датчики устарели; age={age_text}; "
+                    f"подтверждений={self._sensor_stale_count}/{cfg.sensor_fault_confirmations}",
+                ),
                 live_channels,
                 False,
                 fault=True,
             )
+        restored_events: list[str] = []
+        if self._sensor_stale_count:
+            restored_events.append(
+                f"MSP DATA RESTORED: age={sensor_age:.3f}s после "
+                f"{self._sensor_stale_count} пропусков; FOLLOW продолжен"
+            )
+        self._sensor_stale_count = 0
+        self._last_sensor_stale_check_at = None
         if sensor.roll_deg is None or sensor.pitch_deg is None or sensor.altitude_m is None:
             self.state = VisualServoState.FAULT
             self._fault_latched = True
@@ -278,7 +332,7 @@ class VisualServoController:
                 fault=True,
             )
 
-        events: list[str] = []
+        events: list[str] = restored_events
         if self.state in {VisualServoState.DIRECT, VisualServoState.CAPTURE}:
             self._start_follow(live_channels, target, sensor, now)
             events.append(
@@ -432,9 +486,18 @@ class VisualServoController:
         self.last_control_values = None
         self._fault_latched = False
         self._target_lost_latched = False
+        self._sensor_stale_count = 0
+        self._last_sensor_stale_check_at = None
         if previous != state:
             return (f"{previous.value} -> {state.value}: управление возвращено пилоту",)
         return ()
+
+    @staticmethod
+    def _sensor_age(sensor: SensorSample | None, now: float) -> float:
+        """Возвращает возраст самого старого обязательного MSP-показания."""
+        if sensor is None or sensor.altitude_received_at is None or sensor.attitude_received_at is None:
+            return math.inf
+        return max(now - sensor.altitude_received_at, now - sensor.attitude_received_at)
 
     def _learn_hover_reference(
         self,

@@ -198,9 +198,15 @@ class CrsfReceiver:
                 pass
         return parse_frames(buffer)
 
-    def read_raw_frames(self, buffer: bytearray) -> list[bytes]:
-        """Читает UART и возвращает полные CRC-проверенные кадры без изменения."""
-        ready, _, _ = select.select([self._fd], [], [], 0.05)
+    def read_raw_frames(self, buffer: bytearray, timeout_s: float = 0.05) -> list[bytes]:
+        """Читает UART и возвращает полные CRC-проверенные кадры без изменения.
+
+        ``timeout_s`` нужен независимому быстрому мосту: он уменьшает время
+        ожидания UART, не меняя стандартный режим диагностического чтения.
+        """
+        if timeout_s < 0:
+            raise ValueError("Тайм-аут чтения CRSF не может быть отрицательным")
+        ready, _, _ = select.select([self._fd], [], [], timeout_s)
         if ready:
             try:
                 chunk = os.read(self._fd, 4096)

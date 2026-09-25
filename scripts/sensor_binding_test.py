@@ -104,7 +104,7 @@ def main() -> int:
         cycles = int(test_config.get("cycles", 3))
         period_s = int(test_config.get("period_ms", 100)) / 1000.0
         verbose = bool(test_config.get("verbose", False))
-        log_path = PROJECT_DIR / str(test_config.get("log_file", "runs/sensor_binding_test.log"))
+        log_path = PROJECT_DIR / str(test_config.get("log_file", "diagnostics/raspberry/sensor_binding_test.log"))
         if cycles <= 0 or period_s < 0:
             raise RuntimeError("sensor_test: cycles должно быть > 0, period_ms не может быть отрицательным")
         required_sources = {"barometer", "imu", "magnetometer", "compass", "gps", "front_camera"}

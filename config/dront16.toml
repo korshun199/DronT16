@@ -93,12 +93,12 @@ capture_box_offset_y = 12
 [osd.colors]
 # Цвета режимов задаются в формате #RRGGBB.
 idle = "#ffffff"
-capture = "#e3c70b"
+capture = "#ffdd00"
 tracking = "#ff0000"
-control = "#ff00ff"
-lost = "#dc14ff"
-disabled = "#ff0000"
-return = "#ff8c00"
+control = "#1500ff"
+lost = "#33ff55"
+disabled = "#000000"
+return = "#728080"
 
 [osd.output]
 # Геометрия видеовыхода J7.
@@ -215,6 +215,9 @@ level_roll_tolerance_deg = 6.0
 level_pitch_tolerance_deg = 6.0
 # При большем наклоне контур отключается в FAULT и возвращает управление пилоту.
 max_abs_tilt_deg = 45.0
+# Число последовательных просроченных MSP-измерений до перехода в FAULT.
+# Один краткий пропуск переносится с повтором последней безопасной команды.
+sensor_fault_confirmations = 3
 # Преобразование ошибки угла корпуса в ограниченную команду RC.
 attitude_kp = 18.0
 attitude_max_correction = 250
@@ -297,7 +300,16 @@ simulator_control_file = "/tmp/simulator_filesafe_command"
 log_file = "simulator_filesafe.log"
 pilot_log_period_ms = 500
 command_log_period_ms = 100
+# Интервал реального приёма CRSF между кадрами, после которого журнал сообщает
+# о разрыве радиоканала. Он измеряется быстрым трактом, не задержкой камеры.
 rc_gap_log_ms = 100
+# Быстрый CRSF-тракт работает отдельно от MSP, камеры и журнала.
+# Если расчёт сопровождения не обновил команду за это время, pin 8 снова
+# передаёт живые CH1–CH4 пилота вместо старой команды Raspberry.
+realtime_override_max_age_ms = 250
+# Очередь копий кадров для медленного диагностического контура. Переполнение
+# не задерживает UART: старые кадры для расчёта отбрасываются, но не для FC.
+realtime_control_queue_frames = 128
 
 [msp]
 # MSP-датчики FC через Raspberry UART1: pin 27/28.
@@ -321,8 +333,8 @@ front_camera = "RPI/front_camera"
 [sensor_test]
 # Локальный тест привязки не открывает UART, камеру и не отправляет команды FC.
 enabled = true
-# Файл локального журнала теста; каталог runs исключён из Git.
-log_file = "runs/sensor_binding_test.log"
+# Файл локального журнала теста; весь каталог diagnostics исключён из Git.
+log_file = "diagnostics/raspberry/sensor_binding_test.log"
 # Число синтетических циклов, достаточное для проверки объединения ответов MSP.
 cycles = 3
 # Период между синтетическими наборами показаний.

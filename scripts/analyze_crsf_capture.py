@@ -9,6 +9,7 @@ import sys
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 
 # Адрес начала стандартного CRSF-кадра от приёмника.
@@ -29,6 +30,15 @@ class CaptureData:
 
     samples: bytes
     sample_rate: int
+
+
+@dataclass(frozen=True)
+class CaptureIndex:
+    """Индекс большой сессии PulseView без загрузки её целиком в память."""
+
+    path: Path
+    sample_rate: int
+    chunk_names: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -64,6 +74,32 @@ def read_capture(path: Path) -> CaptureData:
         raise ValueError(f"В сессии PulseView отсутствует файл: {error.args[0]}") from error
 
     return CaptureData(samples=samples, sample_rate=sample_rate)
+
+
+def read_capture_index(path: Path) -> CaptureIndex:
+    """Читает метаданные и имена частей большой PulseView-сессии.
+
+    Сохранённый захват может содержать сотни мегабайт распакованных отсчётов.
+    Индекс нужен, чтобы анализировать его последовательно, не расходуя память
+    Raspberry или ноутбука на полную копию сигнала.
+    """
+
+    if not path.is_file():
+        raise FileNotFoundError(f"Файл сессии не найден: {path}")
+    try:
+        with zipfile.ZipFile(path) as archive:
+            metadata = archive.read("metadata").decode("utf-8", errors="replace")
+            chunk_names = tuple(sorted(
+                (name for name in archive.namelist() if name.startswith("logic-1-")),
+                key=logic_chunk_number,
+            ))
+    except zipfile.BadZipFile as error:
+        raise ValueError(f"Файл не является корректной сессией PulseView: {path}") from error
+    except KeyError as error:
+        raise ValueError(f"В сессии PulseView отсутствует файл: {error.args[0]}") from error
+    if not chunk_names:
+        raise ValueError("В сессии нет цифровых отсчётов logic-1-*")
+    return CaptureIndex(path=path, sample_rate=parse_sample_rate(metadata), chunk_names=chunk_names)
 
 
 def parse_sample_rate(metadata: str) -> int:
@@ -135,6 +171,90 @@ def decode_uart(samples: bytes, sample_rate: int, baudrate: int, channel: int) -
             index = int(index + 10 * samples_per_bit)
         else:
             index += 1
+
+    return bytes(decoded)
+
+
+def iter_logic_chunks(capture: CaptureIndex) -> Iterator[bytes]:
+    """Последовательно отдаёт распакованные части цифрового захвата."""
+
+    with zipfile.ZipFile(capture.path) as archive:
+        for name in capture.chunk_names:
+            with archive.open(name) as chunk:
+                yield chunk.read()
+
+
+def decode_uart_stream(
+    capture: CaptureIndex,
+    baudrate: int,
+    channel: int,
+    inverted: bool = False,
+) -> bytes:
+    """Декодирует UART 8N1 из .sr потоково, не загружая весь захват в RAM.
+
+    Хвост предыдущей части сохраняется ровно на время полного UART-байта.
+    Поэтому стартовый бит на границе архивных частей не теряется.
+    """
+
+    if not 0 <= channel <= 7:
+        raise ValueError("Номер канала PulseView должен быть от 0 до 7")
+    if baudrate <= 0 or capture.sample_rate <= baudrate:
+        raise ValueError("Скорость UART и частота захвата заданы неверно")
+
+    samples_per_bit = capture.sample_rate / baudrate
+    required_samples = int(10 * samples_per_bit) + 2
+    # Таблица выполняется в C внутри bytes.translate(), а не Python-циклом
+    # по каждому из сотен миллионов отсчётов.
+    level_table = bytes(
+        ((value >> channel) & 1) ^ int(inverted)
+        for value in range(256)
+    )
+    decoded = bytearray()
+    tail = b""
+    absolute_offset = 0
+    # Начало следующего допустимого UART-байта в общей шкале отсчётов.
+    # Его нельзя вычислять только по концу части архива: внутри уже принятого
+    # байта бывают обычные переходы 1->0, похожие на стартовый бит.
+    next_start_after = 0
+
+    for raw_chunk in iter_logic_chunks(capture):
+        data = tail + raw_chunk
+        data_start = absolute_offset - len(tail)
+        levels = data.translate(level_table)
+        # Последние required_samples оставляем следующему циклу: в них может
+        # начаться байт, чей стоп-бит попадёт уже в следующую часть архива.
+        safe_end = max(1, len(levels) - required_samples)
+        index = max(1, next_start_after - data_start)
+        while index < safe_end:
+            # Ищем с предыдущего отсчёта: при непрерывном UART следующий
+            # стартовый бит начинается ровно там, где закончился прошлый.
+            edge = levels.find(b"\x01\x00", max(0, index - 1))
+            if edge < 0:
+                break
+            start = edge + 1
+            absolute_start = data_start + start
+            if start >= safe_end:
+                break
+
+            midpoint = int(start + 0.5 * samples_per_bit)
+            if levels[midpoint] != 0:
+                index = start + 1
+                continue
+
+            value = 0
+            for bit in range(8):
+                sample_index = int(start + (1.5 + bit) * samples_per_bit)
+                value |= levels[sample_index] << bit
+            stop_index = int(start + 9.5 * samples_per_bit)
+            if levels[stop_index] == 1:
+                decoded.append(value)
+                index = int(start + 10 * samples_per_bit)
+                next_start_after = absolute_start + int(10 * samples_per_bit)
+            else:
+                index = start + 1
+
+        tail = data[-required_samples:]
+        absolute_offset += len(raw_chunk)
 
     return bytes(decoded)
 
@@ -290,6 +410,12 @@ def analyze_channel(capture: CaptureData, baudrate: int, channel: int) -> Analys
     return analyze_bytes(uart_data)
 
 
+def analyze_stream_channel(capture: CaptureIndex, baudrate: int, channel: int) -> AnalysisResult:
+    """Декодирует и анализирует CRSF-канал из большой сессии без переполнения RAM."""
+
+    return analyze_bytes(decode_uart_stream(capture, baudrate, channel))
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Создаёт интерфейс командной строки анализатора."""
 
@@ -310,6 +436,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baudrate", type=int, default=DEFAULT_BAUDRATE, help="скорость CRSF")
     parser.add_argument("--arm-threshold", type=int, default=DEFAULT_ARM_THRESHOLD, help="порог ARM для CH5")
     parser.add_argument("--channels", action="store_true", help="печатать CH1..CH16 при смене состояния")
+    parser.add_argument(
+        "--all-uarts",
+        action="store_true",
+        help="показать объём UART на D2..D5: MSP и DisplayPort по 115200 бод",
+    )
     parser.add_argument("--no-color", action="store_true", help="отключить цветной вывод")
     return parser
 
@@ -320,9 +451,9 @@ def main() -> int:
     parser = build_parser()
     arguments = parser.parse_args()
     try:
-        capture = read_capture(arguments.capture)
-        input_result = analyze_channel(capture, arguments.baudrate, arguments.input_channel)
-        output_result = analyze_channel(capture, arguments.baudrate, arguments.output_channel)
+        capture = read_capture_index(arguments.capture)
+        input_result = analyze_stream_channel(capture, arguments.baudrate, arguments.input_channel)
+        output_result = analyze_stream_channel(capture, arguments.baudrate, arguments.output_channel)
         print(f"Файл: {arguments.capture}")
         print_channel_report(
             "INPUT RX приёмника",
@@ -352,6 +483,16 @@ def main() -> int:
             arguments.arm_threshold,
             use_color=not arguments.no_color and sys.stdout.isatty(),
         )
+        if arguments.all_uarts:
+            print("\n[ДОПОЛНИТЕЛЬНЫЕ UART] 115200 бод, 8N1")
+            for channel, label in (
+                (2, "D2: Raspberry TX -> FC UART2 RX, запросы MSP"),
+                (3, "D3: FC UART2 TX -> Raspberry RX, ответы MSP"),
+                (4, "D4: Raspberry TX -> FC UART6 RX, DisplayPort"),
+                (5, "D5: FC UART6 TX -> Raspberry RX, DisplayPort"),
+            ):
+                uart_bytes = decode_uart_stream(capture, 115_200, channel)
+                print(f"{label}: UART-байтов={len(uart_bytes)}")
     except (OSError, ValueError, zipfile.BadZipFile) as error:
         print(f"ОШИБКА: {error}", file=sys.stderr)
         return 2

@@ -17,7 +17,7 @@
 `sensor_binding_test.py` прогоняет синтетические MSPv1-ответы через настоящий
 `MspParser`, проверяет CRC, свежесть, единицы и объединение показаний барометра,
 IMU, магнитометра/сырого диагностического курса и GPS. Результат пишется в
-`runs/sensor_binding_test.log`.
+`diagnostics/raspberry/sensor_binding_test.log`.
 
 ## Правило конфигурации
 
@@ -45,18 +45,18 @@ config/dront16.toml
 Запуск для входа на D6 и выхода на D5:
 
 ```bash
-python3 scripts/analyze_crsf_capture.py docs/000.sr --input-channel 6 --output-channel 5
+python3 scripts/analyze_crsf_capture.py diagnostics/pulseview/test_dv.sr --input-channel 6 --output-channel 5
 ```
 
 Полный снимок каналов при каждом изменении CH5:
 
 ```bash
-python3 scripts/analyze_crsf_capture.py docs/000.sr --input-channel 6 --output-channel 5 --channels
+python3 scripts/analyze_crsf_capture.py diagnostics/pulseview/test_dv.sr --input-channel 6 --output-channel 5 --channels
 ```
 
 Если анализатор подключён к другим входам PulseView, номера можно изменить.
 Например, вход на D6 и выход на D7:
 
 ```bash
-python3 scripts/analyze_crsf_capture.py docs/000.sr --input-channel 6 --output-channel 7
+python3 scripts/analyze_crsf_capture.py diagnostics/pulseview/test_dv.sr --input-channel 6 --output-channel 7
 ```

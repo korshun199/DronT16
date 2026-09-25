@@ -35,8 +35,8 @@ DIRECT  →  CAPTURE  →  FOLLOW
 ./run.sh sensor-test
 ```
 
-Результат теста сохраняется в `runs/sensor_binding_test.log`, каталог не
-публикуется в Git. Этот тест проверяет программный MSP-контракт, а не реальные
+Результат теста сохраняется в `diagnostics/raspberry/sensor_binding_test.log`,
+каталог не публикуется в Git. Этот тест проверяет программный MSP-контракт, а не реальные
 GPS, магнитометр или камеру.
 
 Режим failsafe выбирается в секции `[failsafe]` файла `config/dront16.toml`:

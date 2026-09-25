@@ -25,11 +25,11 @@ from src.control.visual_servoing import (
 from src.receiver.crsf import (
     CRSF_LINK_STATISTICS,
     CRSF_RC_CHANNELS_PACKED,
-    CrsfReceiver,
     parse_link_statistics,
     unpack_channels,
 )
 from src.receiver.mode import ModeThresholds, ReceiverModeDecoder
+from src.receiver.realtime_bridge import RealtimeCrsfBridge
 from src.receiver.takeover import TakeoverConfig, TakeoverController, TakeoverState
 from src.protocols.betaflight_msp_link import BetaflightMspLink, SensorSample, msp_command_name
 from src.protocols.msp_displayport import DisplayPortCanvas, MspDisplayPortLink, MspDisplayPortWorker
@@ -108,6 +108,11 @@ def main() -> int:
     # Когда модуль Raspberry выключен, потеря RC должна дойти до Betaflight
     # без заморозки кадра: FC тогда запускает свой резервный AUTO-LAND.
     rpi_failsafe_enabled = bool(failsafe_config.get("enabled", False))
+    if rpi_failsafe_enabled:
+        raise ValueError(
+            "Raspberry failsafe нельзя включать до отдельной проверки режима "
+            "повтора кадров в быстром CRSF-тракте"
+        )
     serial_port = str(receiver_config["serial_port"])
     baudrate = int(receiver_config["baudrate"])
     frame_type = int(config["forward_frame_type"])
@@ -122,6 +127,8 @@ def main() -> int:
     pilot_log_period_s = int(config.get("pilot_log_period_ms", 500)) / 1000.0
     command_log_period_s = int(config.get("command_log_period_ms", 100)) / 1000.0
     rc_gap_log_ms = int(config.get("rc_gap_log_ms", 100))
+    realtime_override_max_age_s = int(config.get("realtime_override_max_age_ms", 250)) / 1000.0
+    realtime_queue_frames = int(config.get("realtime_control_queue_frames", 128))
     command_file = Path(str(config.get("control_file", "/tmp/dront16_command")))
     simulator_command_file = Path(str(config.get("simulator_control_file", "/tmp/simulator_filesafe_command")))
     target_state_file = Path(str(target_config.get("target_state_file", "/tmp/dront16_target.json")))
@@ -174,6 +181,8 @@ def main() -> int:
         or rc_gap_log_ms <= 0
         or sensor_log_period_s <= 0
         or target_max_age_s <= 0
+        or realtime_override_max_age_s <= 0
+        or realtime_queue_frames < 8
     ):
         raise ValueError("Неверные параметры каналов simulator_filesafe")
     takeover = TakeoverController(
@@ -193,8 +202,6 @@ def main() -> int:
     )
     last_link_lost: bool | None = None
     last_disarmed: bool | None = None
-    buffer = bytearray()
-    last_rc_time = 0.0
     last_report = 0.0
     received_frames = 0
     forwarded_frames = 0
@@ -224,7 +231,7 @@ def main() -> int:
     last_command_log = 0.0
     last_pilot_log = 0.0
     last_pilot_action_values: tuple[int, ...] | None = None
-    last_rc_interval_ms: float | None = None
+    last_reported_rx_gap_events = 0
     rpi_timeout_reported = False
 
     # До первого свежего кадра считаем терминальный диагностический вывод неактивным.
@@ -413,8 +420,19 @@ def main() -> int:
     print("[CRSF BRIDGE] Ctrl+C — остановка передачи", flush=True)
 
     try:
-        with CrsfReceiver(serial_port, baudrate, write_enabled=True) as bridge_uart:
+        with RealtimeCrsfBridge(
+            serial_port,
+            baudrate,
+            mode_channel=mode_channel + 1,
+            follow_min=int(mode_config["high_min"]),
+            disarm_channel=disarm_channel + 1,
+            disarm_max=disarm_active_max,
+            override_max_age_s=realtime_override_max_age_s,
+            frame_queue_size=realtime_queue_frames,
+            rx_gap_threshold_s=rc_gap_log_ms / 1000.0,
+        ) as fast_bridge:
             while True:
+                fast_bridge.check_error()
                 if msp_link is not None:
                     for sample in msp_link.poll():
                         latest_sensor = sample
@@ -439,7 +457,8 @@ def main() -> int:
                     # внутренний список проверенных пакетов каждого цикла.
                     msp_link.drain_packets()
                 rc_frame_seen = False
-                for frame in bridge_uart.read_raw_frames(buffer):
+                for fast_frame in fast_bridge.drain_frames():
+                    frame = fast_frame.input_frame
                     received_frames += 1
                     if frame[2] != frame_type or frame_type != CRSF_RC_CHANNELS_PACKED:
                         # В LIVE служебный CRSF-кадр должен пройти к FC:
@@ -449,8 +468,6 @@ def main() -> int:
                             and frame[2] == CRSF_LINK_STATISTICS
                             and takeover.state is TakeoverState.LIVE
                         ):
-                            bridge_uart.write_frame(frame)
-                            forwarded_frames += 1
                             link_statistics_forwarded += 1
                             now = time.monotonic()
                             if now - last_link_statistics_log >= report_period_s:
@@ -472,15 +489,6 @@ def main() -> int:
                     now = time.monotonic()
                     # DISARM закрывает журнал после записи последней команды FC.
                     close_journal_after_frame = False
-                    if last_rc_time:
-                        last_rc_interval_ms = (now - last_rc_time) * 1000.0
-                        if last_rc_interval_ms >= rc_gap_log_ms:
-                            journal.write(
-                                "RPI",
-                                f"CRSF RC GAP: interval={last_rc_interval_ms:.1f}ms "
-                                f"threshold={rc_gap_log_ms}ms",
-                                Color.RED,
-                            )
                     # Пишем полный снимок каналов периодически, а важные тумблеры — сразу при изменении.
                     pilot_action_values = (
                         channels[mode_channel],
@@ -616,7 +624,16 @@ def main() -> int:
                             last_command_log = now
                         if failsafe_result.disarm_requested:
                             journal.write("RPI", "COMMAND TO FC: RC CH5 DISARM; MOTORS OFF", Color.RED)
+                    visual_override: tuple[int, ...] | None = None
                     if visual_servo is not None:
+                        # Краткий RX GAP или управляемый TAKEOVER не должны
+                        # сбрасывать FOLLOW в LIVE: visual_servoing продолжает
+                        # работать по последней цели и свежим MSP-данным.
+                        visual_takeover_allowed = (
+                            selected_mode.value == "FOLLOW"
+                            and result.state in (TakeoverState.LIVE, TakeoverState.TAKEOVER)
+                            and (failsafe_result is None or failsafe_result.state.value == "LIVE")
+                        )
                         visual_result = visual_servo.process(
                             output_frame,
                             tuple(unpack_channels(output_frame[3:-1])),
@@ -625,12 +642,11 @@ def main() -> int:
                             latest_sensor,
                             now,
                             armed=not result.disarmed,
-                            takeover_allowed=(
-                                result.state is TakeoverState.LIVE
-                                and (failsafe_result is None or failsafe_result.state.value == "LIVE")
-                            ),
+                            takeover_allowed=visual_takeover_allowed,
                         )
                         output_frame = visual_result.output_frame
+                        if visual_result.output_applied:
+                            visual_override = tuple(unpack_channels(output_frame[3:-1]))
                         for event in visual_result.events:
                             color = Color.RED if visual_result.fault else Color.YELLOW
                             journal.write("RPI", f"VISUAL_SERVO: {event}", color)
@@ -650,9 +666,11 @@ def main() -> int:
                                 Color.RED if visual_result.output_applied else Color.YELLOW,
                             )
                             last_command_log = now
-                    bridge_uart.write_frame(output_frame)
+                    # Физическая передача уже выполнена быстрым потоком.
+                    # Он применит только свежие CH1–CH4 следующего кадра и
+                    # мгновенно обойдёт override по DISARM или CH6 != FOLLOW.
+                    fast_bridge.set_visual_override(visual_override)
                     forwarded_frames += 1
-                    last_rc_time = now
                     if result.output_kind == "THROTTLE_RAMP":
                         frozen_frames += 1
                         output_channels = unpack_channels(result.output_frame[3:-1])
@@ -681,7 +699,11 @@ def main() -> int:
                 timeout_result = None
                 if not rc_frame_seen:
                     timeout_now = time.monotonic()
-                    receiver_timed_out = bool(last_rc_time and timeout_now - last_rc_time >= timeout_s)
+                    fast_stats = fast_bridge.stats()
+                    receiver_timed_out = bool(
+                        fast_stats.last_received_at
+                        and timeout_now - fast_stats.last_received_at >= timeout_s
+                    )
                     if receiver_timed_out and not rpi_failsafe_enabled:
                         # Не посылаем синтетический кадр: Betaflight обязан увидеть
                         # настоящий RX LOSS и выполнить собственный AUTO-LAND.
@@ -702,16 +724,36 @@ def main() -> int:
                 if timeout_result is not None:
                     output_frame = timeout_result.output_frame
                     if visual_servo is not None:
-                        visual_servo.process(
+                        # При активном RPI takeover входящих RC-кадров нет,
+                        # но FOLLOW не должен превращаться в DIRECT. Передаём
+                        # тот же контур цели и MSP; safety ниже имеет приоритет.
+                        timeout_now = time.monotonic()
+                        visual_result = visual_servo.process(
                             output_frame,
                             tuple(unpack_channels(output_frame[3:-1])),
                             selected_mode.value,
-                            None,
+                            target_guidance,
                             latest_sensor,
-                            time.monotonic(),
+                            timeout_now,
                             armed=True,
-                            takeover_allowed=False,
+                            takeover_allowed=(selected_mode.value == "FOLLOW"),
                         )
+                        output_frame = visual_result.output_frame
+                        for event in visual_result.events:
+                            color = Color.RED if visual_result.fault else Color.YELLOW
+                            journal.write("RPI", f"VISUAL_SERVO: {event}", color)
+                        if visual_result.state not in {
+                            VisualServoState.DIRECT,
+                            VisualServoState.CAPTURE,
+                        } and (visual_result.events or timeout_now - last_command_log >= command_log_period_s):
+                            action = "COMMAND" if visual_result.output_applied else "DRY-RUN"
+                            journal.write(
+                                "RPI",
+                                f"VISUAL_SERVO {action}: state={visual_result.state.value} "
+                                f"{format_channels(visual_result.computed_channels)}",
+                                Color.RED if visual_result.output_applied else Color.YELLOW,
+                            )
+                            last_command_log = timeout_now
                     if failsafe is not None:
                         timeout_failsafe = failsafe.process(
                             output_frame,
@@ -726,8 +768,11 @@ def main() -> int:
                         output_frame = timeout_failsafe.output_frame
                         if timeout_failsafe.disarm_requested:
                             journal.write("RPI", "COMMAND TO FC: RC CH5 DISARM; MOTORS OFF", Color.RED)
-                    bridge_uart.write_frame(output_frame)
-                    forwarded_frames += 1
+                    # Текущая конфигурация failsafe Raspberry выключена.
+                    # Если её включат, отдельный режим повторной передачи
+                    # должен быть реализован в быстром тракте до полётного
+                    # использования; нельзя молча писать в чужой UART.
+                    fast_bridge.set_visual_override(None)
                     frozen_frames += 1
                     timeout_now = time.monotonic()
                     if timeout_now - last_command_log >= command_log_period_s:
@@ -746,17 +791,30 @@ def main() -> int:
                         )
                 now = time.monotonic()
                 if now - last_report >= report_period_s:
-                    link = "OK" if last_rc_time and now - last_rc_time <= timeout_s else "LOST"
-                    last_rc_interval_text = (
-                        "n/a" if last_rc_interval_ms is None else f"{last_rc_interval_ms:.1f}"
+                    fast_stats = fast_bridge.stats()
+                    if fast_stats.rx_gap_events != last_reported_rx_gap_events:
+                        journal.write(
+                            "RPI",
+                            f"CRSF RX GAP: interval={fast_stats.last_rx_gap_ms:.1f}ms "
+                            f"threshold={rc_gap_log_ms}ms source=UART0",
+                            Color.RED,
+                        )
+                        last_reported_rx_gap_events = fast_stats.rx_gap_events
+                    link = (
+                        "OK"
+                        if fast_stats.last_received_at
+                        and now - fast_stats.last_received_at <= timeout_s
+                        else "LOST"
                     )
                     journal.write(
                         "RPI",
-                        f"STATUS: link={link} state={takeover.state.value} received={received_frames} "
-                        f"forwarded={forwarded_frames} live={live_frames} frozen={frozen_frames} "
+                        f"STATUS: link={link} state={takeover.state.value} control_received={received_frames} "
+                        f"control_forwarded={forwarded_frames} uart_received={fast_stats.received_frames} "
+                        f"uart_transmitted={fast_stats.transmitted_frames} control_drop={fast_stats.control_dropped_frames} "
+                        f"live={live_frames} frozen={frozen_frames} "
                         f"link_stats={link_statistics_forwarded} "
-                        f"last_rc_interval_ms={last_rc_interval_text} "
-                        f"bytes={bridge_uart.bytes_received}",
+                        f"last_uart_interval_ms={'n/a' if fast_stats.last_rx_interval_ms is None else f'{fast_stats.last_rx_interval_ms:.1f}'} "
+                        f"bytes={fast_stats.received_bytes}",
                         Color.GREEN if link == "OK" else Color.RED,
                     )
                     last_report = now

@@ -37,6 +37,7 @@ def config(**overrides: object) -> VisualServoConfig:
         "rc_max": 1792,
         "target_max_age_s": 0.3,
         "sensor_max_age_s": 0.3,
+        "sensor_fault_confirmations": 3,
         "control_period_s": 0.05,
         "min_scale_percent": 0.05,
         "yaw_deadband": 0.04,
@@ -224,17 +225,51 @@ class VisualServoTests(unittest.TestCase):
         )
         self.assertEqual(restarted.state, VisualServoState.YAW_ALIGN)
 
-    def test_stale_sensor_returns_live_frame_and_latches_fault(self) -> None:
-        """Без свежего MSP управление немедленно возвращается пилоту."""
+    def test_transient_stale_sensor_recovers_without_fault(self) -> None:
+        """Краткий пропуск MSP повторяет последнюю команду и восстанавливается."""
         controller = VisualServoController(config(output_mode="real"))
         frame, channels = rc_frame()
-        stale = sensor(0.0)
+        controller.process(frame, channels, "FOLLOW", target(0.0), sensor(0.0), 0.0, armed=True)
+        delayed = controller.process(
+            frame, channels, "FOLLOW", target(0.4), sensor(0.0), 0.4, armed=True
+        )
+        self.assertNotEqual(delayed.state, VisualServoState.FAULT)
+        self.assertTrue(delayed.output_applied)
+        self.assertIn("MSP DATA DELAY", delayed.events[0])
+        restored = controller.process(
+            frame, channels, "FOLLOW", target(0.45), sensor(0.45), 0.45, armed=True
+        )
+        self.assertNotEqual(restored.state, VisualServoState.FAULT)
+        self.assertIn("MSP DATA RESTORED", restored.events[0])
+
+    def test_persistent_stale_sensor_latches_fault_after_confirmations(self) -> None:
+        """Несколько последовательных пропусков MSP переводят контур в FAULT."""
+        controller = VisualServoController(config(output_mode="real"))
+        frame, channels = rc_frame()
+        controller.process(frame, channels, "FOLLOW", target(0.0), sensor(0.0), 0.0, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.4), sensor(0.0), 0.4, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.8), sensor(0.0), 0.8, armed=True)
         result = controller.process(
-            frame, channels, "FOLLOW", target(1.0), stale, 1.0, armed=True
+            frame, channels, "FOLLOW", target(1.2), sensor(0.0), 1.2, armed=True
         )
         self.assertEqual(result.state, VisualServoState.FAULT)
         self.assertTrue(result.fault)
         self.assertEqual(result.output_frame, frame)
+        self.assertIn("age=1.200s", result.events[0])
+
+    def test_many_queued_frames_do_not_confirm_one_msp_gap(self) -> None:
+        """Несколько кадров за один момент не превращают один MSP GAP в FAULT."""
+        controller = VisualServoController(config(output_mode="real"))
+        frame, channels = rc_frame()
+        controller.process(frame, channels, "FOLLOW", target(0.0), sensor(0.0), 0.0, armed=True)
+        first = controller.process(frame, channels, "FOLLOW", target(0.4), sensor(0.0), 0.4, armed=True)
+        second = controller.process(frame, channels, "FOLLOW", target(0.401), sensor(0.0), 0.401, armed=True)
+        third = controller.process(frame, channels, "FOLLOW", target(0.402), sensor(0.0), 0.402, armed=True)
+        self.assertNotEqual(first.state, VisualServoState.FAULT)
+        self.assertNotEqual(second.state, VisualServoState.FAULT)
+        self.assertNotEqual(third.state, VisualServoState.FAULT)
+        self.assertEqual(second.events, ())
+        self.assertEqual(third.events, ())
 
     def test_disarm_resets_controller_without_modifying_disarm_frame(self) -> None:
         """DISARM имеет приоритет над каждым состоянием visual_servoing."""
