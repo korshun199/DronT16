@@ -15,7 +15,6 @@ MODE_LABELS = {
     Mode.IDLE: "READY",
     Mode.CAPTURE: "CAPTURE",
     Mode.TRACKING: "FOLLOW",
-    Mode.CONTROL: "CONTROL",
     Mode.LOST: "LOST",
     Mode.DISABLED: "DISABLED",
     Mode.RETURN: "RETURN",
@@ -26,8 +25,8 @@ MODE_COLORS = {
     Mode.IDLE: (255, 255, 255),
     Mode.CAPTURE: (0, 220, 255),
     Mode.TRACKING: (0, 0, 255),
-    Mode.CONTROL: (255, 0, 255),
-    Mode.LOST: (0, 0, 255),
+    # После потери цели автомат уже не управляет: базовая рамка белая.
+    Mode.LOST: (255, 255, 255),
     Mode.DISABLED: (0, 0, 255),
     Mode.RETURN: (0, 140, 255),
 }
@@ -41,7 +40,9 @@ def draw_overlay(frame: Any, mode: Mode, target: TargetBox | None, message: str,
     height, width = frame.shape[:2]
     # Цвета из конфигурации хранятся в формате BGR OpenCV.
     colors = osd.mode_colors or MODE_COLORS
-    color = colors[mode]
+    # Конфигурация хранит только три рабочих режима. Внутренние безопасные
+    # состояния LOST/DISABLED получают штатный резервный цвет.
+    color = colors.get(mode, MODE_COLORS[mode])
     if target is None:
         # Центральный квадрат показывает область, которая будет захвачена по 2.
         box_size = min(osd.capture_box_size, width, height)

@@ -63,24 +63,27 @@ class EventJournalTest(unittest.TestCase):
         self.assertIn("fc file only", contents)
         self.assertNotIn("pilot hidden", contents)
 
-    def test_fault_closes_active_session(self) -> None:
-        """После сбоя текущая ARM-сессия закрывается и новые строки не пишутся."""
+    def test_fault_remains_in_active_black_box_session(self) -> None:
+        """FAULT сохраняется, но файл ARM-цикла продолжается до DISARM."""
         with TemporaryDirectory() as directory:
             path = Path(directory) / "fault.log"
             journal = EventJournal(path, "TEST")
             journal.begin_session()
             journal.write("RPI", "before fault", console=False)
-            journal.write("RPI", "SESSION END: FAULT", console=False)
-            journal.end_session()
+            journal.write("RPI", "FAULT: журнал продолжается", console=False)
+            journal.sync()
+            self.assertIsNotNone(journal.session_path)
+            saved_before_close = journal.session_path.read_text(encoding="utf-8")
             journal.write("RPI", "after fault", console=False)
+            journal.end_session()
             journal.close()
 
             self.assertIsNotNone(journal.session_path)
             contents = journal.session_path.read_text(encoding="utf-8")
 
         self.assertIn("before fault", contents)
-        self.assertIn("SESSION END: FAULT", contents)
-        self.assertNotIn("after fault", contents)
+        self.assertIn("FAULT: журнал продолжается", saved_before_close)
+        self.assertIn("after fault", contents)
 
     def test_each_arm_session_gets_a_unique_timestamped_file(self) -> None:
         """Каждый ARM-цикл сохраняется отдельным неперезаписываемым файлом."""
@@ -103,6 +106,22 @@ class EventJournalTest(unittest.TestCase):
             self.assertRegex(first.name, r"simulator_filesafe_\d{8}_\d{6}_\d{3}\.log")
             self.assertIn("first arm", first.read_text(encoding="utf-8"))
             self.assertIn("second arm", second.read_text(encoding="utf-8"))
+
+    def test_ensure_session_opens_file_when_arm_was_active_before_start(self) -> None:
+        """ARM-файл создаётся даже без отдельного перехода состояния моста."""
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "simulator_filesafe.log"
+            journal = EventJournal(path, "TEST")
+
+            self.assertTrue(journal.ensure_session())
+            first = journal.session_path
+            self.assertFalse(journal.ensure_session())
+            journal.write("PILOT", "ARM already active", console=False)
+            journal.close()
+
+            self.assertIsNotNone(first)
+            self.assertTrue(first.exists())
+            self.assertIn("ARM already active", first.read_text(encoding="utf-8"))
 
     def test_async_file_writer_flushes_before_disarm_closes_session(self) -> None:
         """Фоновая запись не теряет события ARM-цикла при немедленном DISARM."""

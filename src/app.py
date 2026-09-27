@@ -101,8 +101,6 @@ def main() -> int:
     j7_device = str(args.j7_device or video_config["j7_device"])
     control_file = str(args.control_file or video_config["control_file"])
     target_state_file = follow_config.control.state_file
-    receiver_config = load_config_section(args.config, "receiver")
-    arm_state_file = Path(str(receiver_config.get("arm_state_file", "/tmp/dront16_arm_state")))
     fullscreen = bool(video_config["hdmi_fullscreen"] if args.fullscreen is None else args.fullscreen)
     if display_name == "auto":
         display_name = "j7" if sys.platform.startswith("linux") and Path("/proc/device-tree/model").exists() else "web"
@@ -179,11 +177,6 @@ def main() -> int:
         if fullscreen:
             cv2.setWindowProperty("DronT16", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
     message = "LIVE"
-    started_at = time.monotonic()
-    last_range_report = 0.0
-    last_reported_capture = False
-    last_under_control = False
-    last_terminal_report = 0.0
 
     try:
         while True:
@@ -192,16 +185,19 @@ def main() -> int:
                 updated_target = tracker.update(frame)
                 machine.update_target(updated_target)
                 if updated_target is None:
-                    message = "TARGET LOST: SELECT AGAIN AND PRESS 1"
+                    # Потеря цели сразу возвращает белый DIRECT. Старая
+                    # отметка расстояния не существует как отдельный режим.
+                    message = "PILOT DIRECT: TARGET LOST"
             if machine.mode is Mode.LOST:
-                display_mode = Mode.LOST
+                # Потеря цели — это не новый автоматический режим. Рамка и
+                # цвет должны немедленно показать обычное ручное управление.
+                display_mode = Mode.IDLE
             # Штатное OSD Betaflight рисуется первым, наша рамка — поверх него.
             frame = draw_betaflight_osd(frame, betaflight_osd_config)
-            # На J7 оставляем только графику: рамку и линию к цели.
-            # Пурпурный цвет включается после подтверждённого достижения порога.
-            overlay_mode = Mode.CONTROL if last_under_control else display_mode
+            # На J7 оставляем рамку и линию к цели. Сопровождение всегда
+            # красное, а возврат в DIRECT — белый и не маскируется порогом.
             overlay_message = "" if display_name == "j7" else message
-            rendered = draw_overlay(frame, overlay_mode, machine.target, overlay_message, osd_config)
+            rendered = draw_overlay(frame, display_mode, machine.target, overlay_message, osd_config)
             hub.update(rendered, display_mode, machine.target, message)
             if j7_output is not None:
                 j7_output.write(rendered)
@@ -238,8 +234,6 @@ def main() -> int:
                         message = result.message
                         range_estimator.reset()
                         message = "CAPTURE MODE"
-                        print("\033[33mРЕЖИМ ЗАХВАТА\033[0m", flush=True)
-                        last_reported_capture = True
                 else:
                     message = result.message
                 display_mode = machine.mode
@@ -262,31 +256,6 @@ def main() -> int:
                     machine.target, frame.shape[1], frame.shape[0], measured_area_percent,
                     control_area_percent,
                 )
-                now = time.monotonic()
-                arm_active = False
-                try:
-                    arm_active = arm_state_file.read_text(encoding="ascii").strip() == "ARM"
-                except (FileNotFoundError, OSError, UnicodeError):
-                    arm_active = False
-                if arm_active and now - last_terminal_report >= follow_config.range.report_period_ms / 1000.0:
-                    if machine.mode is Mode.CAPTURE:
-                        message = f"CAPTURE MODE | {measurement.horizontal_position}"
-                        terminal_color = "\033[33m"
-                    elif measurement.under_control:
-                        message = "КОНТРОЛЬ!"
-                        terminal_color = "\033[35m"
-                    else:
-                        message = f"FOLLOW MODE | {measurement.horizontal_position}"
-                        terminal_color = "\033[31m"
-                    elapsed = now - started_at
-                    minutes = int(elapsed // 60)
-                    seconds = elapsed % 60
-                    # Пороговое событие выводится отдельной строкой один раз.
-                    if not measurement.under_control or not last_under_control:
-                        print(f"{terminal_color}[{minutes:02d}:{seconds:06.3f}] {message}\033[0m", flush=True)
-                    last_terminal_report = now
-                    last_range_report = now
-                last_under_control = measurement.under_control
                 guidance = calculate_guidance(
                     machine.target, frame.shape[1], frame.shape[0], follow_config
                 )
@@ -301,14 +270,6 @@ def main() -> int:
                     scale_percent=measurement.object_area_percent,
                 )
             else:
-                try:
-                    arm_active = arm_state_file.read_text(encoding="ascii").strip() == "ARM"
-                except (FileNotFoundError, OSError, UnicodeError):
-                    arm_active = False
-                now = time.monotonic()
-                if arm_active and now - last_terminal_report >= follow_config.range.report_period_ms / 1000.0:
-                    print(f"\033[37m[DIRECT/LIVE]\033[0m", flush=True)
-                    last_terminal_report = now
                 # После отбоя или потери цели мост не должен использовать старые координаты.
                 write_target_guidance(
                     target_state_file,
@@ -320,8 +281,6 @@ def main() -> int:
                     normalized_y=None,
                     scale_percent=None,
                 )
-                last_reported_capture = False
-                last_under_control = False
     finally:
         tracker.reset()
         source.close()

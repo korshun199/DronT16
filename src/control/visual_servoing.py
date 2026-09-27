@@ -21,8 +21,6 @@ class VisualServoState(str, Enum):
 
     DIRECT = "DIRECT"
     CAPTURE = "CAPTURE"
-    YAW_ALIGN = "YAW_ALIGN"
-    YAW_HOLD = "YAW_HOLD"
     ALTITUDE_HOLD = "ALTITUDE_HOLD"
     FOLLOW = "FOLLOW"
     TARGET_LOST = "TARGET_LOST"
@@ -47,14 +45,7 @@ class VisualServoConfig:
     sensor_fault_confirmations: int
     control_period_s: float
     min_scale_percent: float
-    yaw_deadband: float
-    yaw_kp: float
-    yaw_kd: float
-    yaw_max_correction: int
-    yaw_direction: float
     derivative_alpha: float
-    yaw_stable_frames: int
-    yaw_hold_s: float
     level_roll_tolerance_deg: float
     level_pitch_tolerance_deg: float
     max_abs_tilt_deg: float
@@ -75,6 +66,20 @@ class VisualServoConfig:
     pitch_kd: float
     pitch_max_angle_deg: float
     pitch_direction: float
+    roll_follow_enabled: bool
+    roll_follow_deadband: float
+    roll_follow_kp: float
+    roll_follow_kd: float
+    roll_follow_max_angle_deg: float
+    roll_follow_direction: float
+    roll_angle_to_rate_kp: float
+    roll_rate_max_correction: int
+    roll_rate_slew_per_s: float
+    coordinated_yaw_enabled: bool
+    coordinated_yaw_kp: float
+    coordinated_yaw_max_correction: int
+    coordinated_yaw_direction: float
+    roll_thrust_compensation_enabled: bool
     hover_learning_alpha: float
     hover_learning_max_vario_m_s: float
     hover_learning_max_tilt_deg: float
@@ -94,16 +99,26 @@ class VisualServoConfig:
             raise ValueError("Возраст координат и датчиков должен быть положительным")
         if self.sensor_fault_confirmations < 1:
             raise ValueError("Число подтверждений устаревших MSP-данных должно быть положительным")
-        if self.min_scale_percent <= 0 or self.yaw_stable_frames < 1:
-            raise ValueError("Неверный минимальный масштаб или число стабильных кадров")
+        if self.min_scale_percent <= 0:
+            raise ValueError("Неверный минимальный масштаб цели")
         if not 0 < self.derivative_alpha <= 1 or not 0 < self.hover_learning_alpha <= 1:
             raise ValueError("Коэффициенты сглаживания должны быть в диапазоне (0, 1]")
-        if self.yaw_hold_s < 0 or self.altitude_hold_s < 0:
+        if self.altitude_hold_s < 0:
             raise ValueError("Время подтверждения состояния не может быть отрицательным")
         if self.altitude_integral_limit < 0:
             raise ValueError("Ограничение интегратора не может быть отрицательным")
-        if self.attitude_kp <= 0 or self.attitude_max_correction <= 0 or self.pitch_max_angle_deg <= 0:
+        if self.attitude_kp <= 0 or self.attitude_max_correction <= 0:
             raise ValueError("Параметры контура горизонта должны быть положительными")
+        if self.pitch_max_angle_deg <= 0 or self.roll_follow_max_angle_deg <= 0:
+            raise ValueError("Максимальные углы pitch и roll должны быть положительными")
+        if self.roll_follow_deadband < 0 or self.roll_follow_kp < 0 or self.roll_follow_kd < 0:
+            raise ValueError("Параметры бокового контура не могут быть отрицательными")
+        if self.roll_angle_to_rate_kp <= 0 or self.roll_rate_max_correction <= 0:
+            raise ValueError("Параметры ACRO-контура roll должны быть положительными")
+        if self.roll_rate_slew_per_s <= 0:
+            raise ValueError("Скорость изменения команды roll должна быть положительной")
+        if self.coordinated_yaw_kp < 0 or self.coordinated_yaw_max_correction < 0:
+            raise ValueError("Параметры координированного yaw не могут быть отрицательными")
         if not self.rc_min <= self.hover_learning_min_throttle < self.hover_learning_max_throttle <= self.rc_max:
             raise ValueError("Неверный диапазон обучения газа висения")
 
@@ -130,14 +145,7 @@ def build_visual_servo_config(
         sensor_fault_confirmations=int(section["sensor_fault_confirmations"]),
         control_period_s=int(section["control_period_ms"]) / 1000.0,
         min_scale_percent=float(section["min_scale_percent"]),
-        yaw_deadband=float(section["yaw_deadband"]),
-        yaw_kp=float(section["yaw_kp"]),
-        yaw_kd=float(section["yaw_kd"]),
-        yaw_max_correction=int(section["yaw_max_correction"]),
-        yaw_direction=float(section["yaw_direction"]),
         derivative_alpha=float(section["derivative_alpha"]),
-        yaw_stable_frames=int(section["yaw_stable_frames"]),
-        yaw_hold_s=float(section["yaw_hold_s"]),
         level_roll_tolerance_deg=float(section["level_roll_tolerance_deg"]),
         level_pitch_tolerance_deg=float(section["level_pitch_tolerance_deg"]),
         max_abs_tilt_deg=float(section["max_abs_tilt_deg"]),
@@ -158,6 +166,20 @@ def build_visual_servo_config(
         pitch_kd=float(section["pitch_kd"]),
         pitch_max_angle_deg=float(section["pitch_max_angle_deg"]),
         pitch_direction=float(section["pitch_direction"]),
+        roll_follow_enabled=bool(section["roll_follow_enabled"]),
+        roll_follow_deadband=float(section["roll_follow_deadband"]),
+        roll_follow_kp=float(section["roll_follow_kp"]),
+        roll_follow_kd=float(section["roll_follow_kd"]),
+        roll_follow_max_angle_deg=float(section["roll_follow_max_angle_deg"]),
+        roll_follow_direction=float(section["roll_follow_direction"]),
+        roll_angle_to_rate_kp=float(section["roll_angle_to_rate_kp"]),
+        roll_rate_max_correction=int(section["roll_rate_max_correction"]),
+        roll_rate_slew_per_s=float(section["roll_rate_slew_per_s"]),
+        coordinated_yaw_enabled=bool(section["coordinated_yaw_enabled"]),
+        coordinated_yaw_kp=float(section["coordinated_yaw_kp"]),
+        coordinated_yaw_max_correction=int(section["coordinated_yaw_max_correction"]),
+        coordinated_yaw_direction=float(section["coordinated_yaw_direction"]),
+        roll_thrust_compensation_enabled=bool(section["roll_thrust_compensation_enabled"]),
         hover_learning_alpha=float(section["hover_learning_alpha"]),
         hover_learning_max_vario_m_s=float(section["hover_learning_max_vario_m_s"]),
         hover_learning_max_tilt_deg=float(section["hover_learning_max_tilt_deg"]),
@@ -182,7 +204,7 @@ class VisualServoResult:
 
 
 class VisualServoController:
-    """Наводит нос, удерживает высоту и затем регулирует дистанцию по масштабу."""
+    """Удерживает высоту и ведёт дрон к цели по координированной дуге."""
 
     def __init__(self, config: VisualServoConfig) -> None:
         """Создаёт безопасный контроллер без активной цели."""
@@ -192,14 +214,13 @@ class VisualServoController:
         self.hover_reference: float | None = None
         self.hold_altitude_m: float | None = None
         self.scale_reference: float | None = None
-        self.yaw_reference_deg: float | None = None
         self.altitude_integral = 0.0
         self.last_time: float | None = None
-        self.last_yaw_error = 0.0
+        self.last_roll_error = 0.0
+        self.last_roll_rate_correction = 0.0
         self.last_scale_error = 0.0
-        self.filtered_yaw_derivative = 0.0
+        self.filtered_roll_derivative = 0.0
         self.filtered_scale_derivative = 0.0
-        self.yaw_stable_count = 0
         self.state_started_at: float | None = None
         self.last_calculation_at: float | None = None
         self.last_control_values: tuple[int, int, int, int] | None = None
@@ -336,7 +357,7 @@ class VisualServoController:
         if self.state in {VisualServoState.DIRECT, VisualServoState.CAPTURE}:
             self._start_follow(live_channels, target, sensor, now)
             events.append(
-                f"FOLLOW -> YAW_ALIGN: altitude={self.hold_altitude_m:.2f}m "
+                f"FOLLOW -> ALTITUDE_HOLD: altitude={self.hold_altitude_m:.2f}m "
                 f"scale={self.scale_reference:.3f}% hover={self.hover_reference:.0f}"
             )
 
@@ -362,13 +383,16 @@ class VisualServoController:
         dt = self._step_time(now)
         ex = float(target.normalized_x or 0.0)
         scale = float(target.scale_percent or cfg.min_scale_percent)
-        yaw_command = self._yaw_command(ex, dt)
-        throttle_command = self._altitude_command(sensor, dt)
+        follow_roll_target = 0.0
+        if self.state is VisualServoState.FOLLOW and cfg.roll_follow_enabled:
+            follow_roll_target = self._roll_target_deg(ex, dt)
+        yaw_command = self._coordinated_yaw_command(follow_roll_target)
+        throttle_command = self._altitude_command(sensor, dt, follow_roll_target)
         output_channels = list(live_channels)
-        # Внешний контур задаёт требуемые углы, а Betaflight выполняет быстрый
-        # внутренний PID и распределяет тягу между моторами.
-        output_channels[cfg.roll_channel] = self._attitude_command(
-            sensor.roll_deg, 0.0, cfg.roll_direction
+        # В ACRO CH1 задаёт угловую скорость. Raspberry замыкает внешний
+        # контур по фактическому roll из MSP, а Betaflight стабилизирует rate.
+        output_channels[cfg.roll_channel] = self._roll_rate_command(
+            sensor.roll_deg, follow_roll_target, dt
         )
         output_channels[cfg.pitch_channel] = self._attitude_command(
             sensor.pitch_deg, 0.0, cfg.pitch_rc_direction
@@ -380,35 +404,12 @@ class VisualServoController:
             abs(sensor.roll_deg) <= cfg.level_roll_tolerance_deg
             and abs(sensor.pitch_deg) <= cfg.level_pitch_tolerance_deg
         )
-        yaw_ok = abs(ex) <= cfg.yaw_deadband
-
-        if self.state is VisualServoState.YAW_ALIGN:
-            self.yaw_stable_count = self.yaw_stable_count + 1 if yaw_ok and level_ok else 0
-            if self.yaw_stable_count >= cfg.yaw_stable_frames:
-                self.state = VisualServoState.YAW_HOLD
-                self.state_started_at = now
-                self.yaw_reference_deg = sensor.yaw_deg
-                events.append("YAW_ALIGN -> YAW_HOLD: цель и горизонт подтверждены")
-
-        elif self.state is VisualServoState.YAW_HOLD:
-            if not yaw_ok or not level_ok:
-                self.state = VisualServoState.YAW_ALIGN
-                self.state_started_at = now
-                self.yaw_stable_count = 0
-                events.append("YAW_HOLD -> YAW_ALIGN: цель вышла из допуска")
-            elif self._state_age(now) >= cfg.yaw_hold_s:
-                self.state = VisualServoState.ALTITUDE_HOLD
-                self.state_started_at = now
-                events.append("YAW_HOLD -> ALTITUDE_HOLD")
-
-        elif self.state is VisualServoState.ALTITUDE_HOLD:
+        if self.state is VisualServoState.ALTITUDE_HOLD:
             altitude_error = abs((self.hold_altitude_m or sensor.altitude_m) - sensor.altitude_m)
             vario = abs(sensor.vario_m_s or 0.0)
-            if not yaw_ok or not level_ok:
-                self.state = VisualServoState.YAW_ALIGN
+            if not level_ok:
                 self.state_started_at = now
-                self.yaw_stable_count = 0
-                events.append("ALTITUDE_HOLD -> YAW_ALIGN: потеряно наведение или горизонт")
+                events.append("ALTITUDE_HOLD: ожидание горизонтального положения")
             elif (
                 altitude_error <= cfg.altitude_tolerance_m
                 and vario <= cfg.vario_tolerance_m_s
@@ -416,20 +417,26 @@ class VisualServoController:
             ):
                 self.state = VisualServoState.FOLLOW
                 self.state_started_at = now
-                events.append("ALTITUDE_HOLD -> FOLLOW: разрешён ограниченный pitch")
+                events.append("ALTITUDE_HOLD -> FOLLOW: разрешена координированная дуга")
 
         elif self.state is VisualServoState.FOLLOW:
+            if cfg.roll_follow_enabled:
+                events.append(
+                    f"FOLLOW: roll target={follow_roll_target:.2f}deg "
+                    f"error_x={ex:+.3f}"
+                )
             target_pitch_deg = self._pitch_target_deg(scale, dt)
             output_channels[cfg.pitch_channel] = self._attitude_command(
                 sensor.pitch_deg, target_pitch_deg, cfg.pitch_rc_direction
             )
-            if abs(sensor.roll_deg) > cfg.level_roll_tolerance_deg:
-                # При боковом наклоне движение вперёд/назад прекращается,
-                # а pitch-контур сначала возвращает корпус к нулевому углу.
+            roll_tracking_error = abs(sensor.roll_deg - follow_roll_target)
+            if roll_tracking_error > cfg.level_roll_tolerance_deg:
+                # Заданный крен сам по себе не является ошибкой: блокировка
+                # нужна только если фактический roll заметно не следует цели.
                 output_channels[cfg.pitch_channel] = self._attitude_command(
                     sensor.pitch_deg, 0.0, cfg.pitch_rc_direction
                 )
-                events.append("FOLLOW: движение заблокировано до восстановления roll")
+                events.append("FOLLOW: pitch заблокирован до захвата заданного roll")
 
         computed_channels = tuple(self._clamp_rc(value) for value in output_channels)
         self.last_control_values = (
@@ -449,22 +456,21 @@ class VisualServoController:
         sensor: SensorSample,
         now: float,
     ) -> None:
-        """Фиксирует опорные значения только при подтверждённом входе в FOLLOW."""
+        """Фиксирует высоту и масштаб, затем начинает безопасную стабилизацию."""
         cfg = self.config
-        self.state = VisualServoState.YAW_ALIGN
+        self.state = VisualServoState.ALTITUDE_HOLD
         self.hold_altitude_m = float(sensor.altitude_m if sensor.altitude_m is not None else 0.0)
         self.scale_reference = float(target.scale_percent or cfg.min_scale_percent)
-        self.yaw_reference_deg = sensor.yaw_deg
         if self.hover_reference is None:
             self.hover_reference = float(channels[cfg.throttle_channel])
         self.hover_reference = float(self._clamp_rc(round(self.hover_reference)))
         self.altitude_integral = 0.0
         self.last_time = now
-        self.last_yaw_error = float(target.normalized_x or 0.0)
+        self.last_roll_error = float(target.normalized_x or 0.0)
+        self.last_roll_rate_correction = 0.0
         self.last_scale_error = 0.0
-        self.filtered_yaw_derivative = 0.0
+        self.filtered_roll_derivative = 0.0
         self.filtered_scale_derivative = 0.0
-        self.yaw_stable_count = 0
         self.state_started_at = now
         self.last_calculation_at = None
         self.last_control_values = None
@@ -475,12 +481,12 @@ class VisualServoController:
         self.state = state
         self.hold_altitude_m = None
         self.scale_reference = None
-        self.yaw_reference_deg = None
         self.altitude_integral = 0.0
         self.last_time = None
-        self.filtered_yaw_derivative = 0.0
+        self.last_roll_error = 0.0
+        self.last_roll_rate_correction = 0.0
+        self.filtered_roll_derivative = 0.0
         self.filtered_scale_derivative = 0.0
-        self.yaw_stable_count = 0
         self.state_started_at = None
         self.last_calculation_at = None
         self.last_control_values = None
@@ -535,22 +541,38 @@ class VisualServoController:
             return 0.0
         return max(0.0, min(0.2, now - previous))
 
-    def _yaw_command(self, error: float, dt: float) -> int:
-        """Рассчитывает ограниченную PD-команду yaw по горизонтальной ошибке."""
+    def _coordinated_yaw_command(self, roll_target_deg: float) -> int:
+        """Даёт небольшой yaw только как помощь крену на дуге траектории."""
         cfg = self.config
-        derivative = 0.0 if dt <= 0 else (error - self.last_yaw_error) / dt
-        self.last_yaw_error = error
-        alpha = cfg.derivative_alpha
-        self.filtered_yaw_derivative = (
-            alpha * derivative + (1.0 - alpha) * self.filtered_yaw_derivative
-        )
-        if abs(error) <= cfg.yaw_deadband:
+        if not cfg.coordinated_yaw_enabled or abs(roll_target_deg) <= 0.0:
             return cfg.rc_center
-        correction = cfg.yaw_direction * (
-            cfg.yaw_kp * error + cfg.yaw_kd * self.filtered_yaw_derivative
+        correction = cfg.coordinated_yaw_direction * (
+            cfg.coordinated_yaw_kp * roll_target_deg
         )
-        correction = max(-cfg.yaw_max_correction, min(cfg.yaw_max_correction, correction))
+        correction = max(
+            -cfg.coordinated_yaw_max_correction,
+            min(cfg.coordinated_yaw_max_correction, correction),
+        )
         return self._clamp_rc(round(cfg.rc_center + correction))
+
+    def _roll_target_deg(self, error: float, dt: float) -> float:
+        """Рассчитывает требуемый боковой крен по горизонтальной ошибке цели."""
+        cfg = self.config
+        derivative = 0.0 if dt <= 0 else (error - self.last_roll_error) / dt
+        self.last_roll_error = error
+        alpha = cfg.derivative_alpha
+        self.filtered_roll_derivative = (
+            alpha * derivative + (1.0 - alpha) * self.filtered_roll_derivative
+        )
+        if abs(error) <= cfg.roll_follow_deadband:
+            return 0.0
+        target_angle = cfg.roll_follow_direction * (
+            cfg.roll_follow_kp * error + cfg.roll_follow_kd * self.filtered_roll_derivative
+        )
+        return max(
+            -cfg.roll_follow_max_angle_deg,
+            min(cfg.roll_follow_max_angle_deg, target_angle),
+        )
 
     def _pitch_target_deg(self, scale: float, dt: float) -> float:
         """Рассчитывает требуемый угол pitch по относительному масштабу цели."""
@@ -570,8 +592,27 @@ class VisualServoController:
         )
         return max(-cfg.pitch_max_angle_deg, min(cfg.pitch_max_angle_deg, target_angle))
 
+    def _roll_rate_command(self, measured_deg: float, target_deg: float, dt: float) -> int:
+        """Преобразует ошибку roll в плавную ограниченную RC-rate команду ACRO."""
+        cfg = self.config
+        requested = cfg.roll_direction * (target_deg - measured_deg) * cfg.roll_angle_to_rate_kp
+        requested = max(
+            -cfg.roll_rate_max_correction,
+            min(cfg.roll_rate_max_correction, requested),
+        )
+        # На первом такте берём заданный период контура: это не даёт первой
+        # команде перескочить ограничение при нулевом dt.
+        interval = cfg.control_period_s if dt <= 0.0 else dt
+        maximum_step = cfg.roll_rate_slew_per_s * interval
+        correction = max(
+            self.last_roll_rate_correction - maximum_step,
+            min(self.last_roll_rate_correction + maximum_step, requested),
+        )
+        self.last_roll_rate_correction = correction
+        return self._clamp_rc(round(cfg.rc_center + correction))
+
     def _attitude_command(self, measured_deg: float, target_deg: float, direction: float) -> int:
-        """Преобразует ошибку требуемого угла в ограниченное отклонение RC."""
+        """Преобразует ошибку угла pitch в ограниченную RC-rate команду ACRO."""
         cfg = self.config
         correction = direction * (target_deg - measured_deg) * cfg.attitude_kp
         correction = max(
@@ -580,7 +621,7 @@ class VisualServoController:
         )
         return self._clamp_rc(round(cfg.rc_center + correction))
 
-    def _altitude_command(self, sensor: SensorSample, dt: float) -> int:
+    def _altitude_command(self, sensor: SensorSample, dt: float, roll_target_deg: float = 0.0) -> int:
         """Удерживает высоту PI-контуром с демпфированием по вариометру."""
         cfg = self.config
         reference = float(
@@ -605,7 +646,11 @@ class VisualServoController:
             min(cfg.throttle_max_correction, correction),
         )
         hover = float(self.hover_reference or cfg.rc_center)
-        return self._clamp_rc(round(hover + correction))
+        command = hover + correction
+        if cfg.roll_thrust_compensation_enabled and abs(roll_target_deg) > 0.0:
+            cosine = max(0.90, math.cos(math.radians(roll_target_deg)))
+            command /= cosine
+        return self._clamp_rc(round(command))
 
     def _state_age(self, now: float) -> float:
         """Возвращает время нахождения в текущем состоянии."""

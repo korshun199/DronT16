@@ -202,6 +202,9 @@ def main() -> int:
     )
     last_link_lost: bool | None = None
     last_disarmed: bool | None = None
+    # Нужен только для одноразовой синхронизации записи FAULT: нельзя
+    # выполнять fsync на каждом кадре и рисковать задержкой управляющего цикла.
+    last_failsafe_state = "LIVE"
     last_report = 0.0
     received_frames = 0
     forwarded_frames = 0
@@ -537,6 +540,30 @@ def main() -> int:
                     )
                     rpi_timeout_reported = False
                     log_controller_events(result.events, now)
+                    if not result.disarmed:
+                        # ARM должен открывать журнал даже если он уже был
+                        # включён до запуска Raspberry или внутренний флаг
+                        # моста не увидел отдельный переход CH5.
+                        try:
+                            if journal.ensure_session():
+                                journal.write(
+                                    "PILOT",
+                                    f"ARM SESSION: подтверждён CH{disarm_channel + 1}="
+                                    f"{channels[disarm_channel]}",
+                                    Color.GREEN,
+                                )
+                                # Заголовок ARM и подтверждение должны пережить
+                                # внезапную остановку питания, не ожидая
+                                # обычной периодической синхронизации журнала.
+                                journal.sync()
+                        except (OSError, RuntimeError) as error:
+                            # Ошибка журнала не должна остановить передачу RC.
+                            journal.write(
+                                "RPI",
+                                f"JOURNAL ERROR: ARM-сессия не открыта: {error}",
+                                Color.RED,
+                                file=False,
+                            )
                     if result.link_lost != last_link_lost:
                         journal.write(
                             "PILOT",
@@ -547,8 +574,6 @@ def main() -> int:
                         last_link_lost = result.link_lost
                     if result.disarmed != last_disarmed:
                         if not result.disarmed:
-                            # Новый файл испытания начинается с первого ARM.
-                            journal.begin_session()
                             try:
                                 arm_state_file.write_text("ARM", encoding="ascii")
                             except OSError as error:
@@ -591,6 +616,7 @@ def main() -> int:
                             now,
                             armed=False,
                         )
+                        last_failsafe_state = "LIVE"
                     if failsafe is not None and result.output_kind != "DISARM":
                         failsafe_result = failsafe.process(
                             output_frame,
@@ -604,11 +630,17 @@ def main() -> int:
                             event_kind = "SAFETY" if "FAULT" in event else "DECISION"
                             color = Color.RED if event_kind == "SAFETY" else Color.YELLOW
                             journal.write("RPI", f"{event_kind}: {event}", color)
-                        if failsafe_result.state.value == "FAULT":
-                            # Сбой закрывает текущую ARM-сессию; новые данные
-                            # не смешиваются с этим испытательным циклом.
-                            journal.write("RPI", "SESSION END: FAULT", Color.RED)
-                            journal.end_session()
+                        if (
+                            failsafe_result.state.value == "FAULT"
+                            and last_failsafe_state != "FAULT"
+                        ):
+                            # FAULT — событие чёрного ящика, а не конец полёта.
+                            # Продолжаем писать в тот же ARM-файл до DISARM или
+                            # штатной остановки процесса, чтобы не потерять
+                            # дальнейшие действия пилота и полётника.
+                            journal.write("RPI", "FAULT: журнал продолжается до DISARM/STOP", Color.RED)
+                            journal.sync()
+                        last_failsafe_state = failsafe_result.state.value
                         output_frame = failsafe_result.output_frame
                         if failsafe_result.state.value != "LIVE" and (
                             failsafe_result.events

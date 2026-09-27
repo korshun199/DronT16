@@ -96,6 +96,19 @@ class EventJournal:
             self.sequence = 0
             self.last_sync = self.start_time
 
+    def ensure_session(self) -> bool:
+        """Открывает ARM-файл, если он ещё не открыт.
+
+        Возвращает ``True`` только при создании нового файла. Метод нужен
+        для случая, когда Raspberry запускается уже при активном ARM или
+        внутреннее состояние моста потеряло переход DISARM -> ARM.
+        """
+        with self._lock:
+            if self.session_active:
+                return False
+        self.begin_session()
+        return True
+
     def end_session(self) -> None:
         """Завершает и закрывает текущий файл ARM-цикла."""
         # Новые строки больше не ставятся в очередь; уже поставленные нужно
@@ -109,6 +122,17 @@ class EventJournal:
                 self._sync_file(force=True)
                 self.file.close()
                 self.file = None
+
+    def sync(self) -> None:
+        """Немедленно сохраняет уже поставленные в очередь критические события.
+
+        Применяется для ARM и аварийных записей. Обычные пакеты датчиков
+        остаются асинхронными, чтобы файловая система не задерживала CRSF.
+        """
+        if self._file_queue is not None:
+            self._file_queue.join()
+        with self._lock:
+            self._sync_file(force=True)
 
     def _sync_file(self, *, force: bool = False) -> None:
         """Синхронизирует журнал с файловой системой не реже двух раз в секунду."""
