@@ -22,6 +22,12 @@ class TargetVerifier:
         self.method = method
         self.adaptation_rate = adaptation_rate
         self.foreground_margin_percent = foreground_margin_percent
+        # Исходный образец никогда не изменяется: он не даёт адаптивному
+        # трекеру постепенно принять фон за первоначально выбранную цель.
+        self._capture_template: Any = None
+        self._capture_histogram: Any = None
+        # Рабочий образец может медленно адаптироваться к освещению и ракурсу,
+        # но используется только вместе с неизменяемым исходным образцом.
         self._template: Any = None
         self._histogram: Any = None
         self._bad_frames = 0
@@ -47,15 +53,19 @@ class TargetVerifier:
             raise ValueError("Нельзя сохранить пустой образец цели")
         self._reference_frame = frame.copy()
         sample = self._foreground_crop(crop)
-        self._template = cv2.resize(sample, (64, 64), interpolation=cv2.INTER_AREA)
+        capture_template = cv2.resize(sample, (64, 64), interpolation=cv2.INTER_AREA)
         hsv = cv2.cvtColor(sample, cv2.COLOR_BGR2HSV)
-        self._histogram = cv2.normalize(
+        capture_histogram = cv2.normalize(
             cv2.calcHist([hsv], [0, 1], None, [16, 16], [0, 180, 0, 256]),
             None,
             0,
             1,
             cv2.NORM_MINMAX,
         )
+        self._capture_template = capture_template.copy()
+        self._capture_histogram = capture_histogram.copy()
+        self._template = capture_template.copy()
+        self._histogram = capture_histogram.copy()
         self._bad_frames = 0
 
     def _foreground_crop(self, crop: Any) -> Any:
@@ -133,9 +143,15 @@ class TargetVerifier:
         return float(cv2.countNonZero(changed)) / (frame.shape[0] * frame.shape[1]) * 100.0
 
     def verify(self, frame: Any, target: TargetBox) -> bool:
-        """Проверяет цветовую и визуальную близость найденной области."""
+        """Проверяет область одновременно с исходной и рабочей моделями."""
         crop = self._crop(frame, target)
-        if crop is None or self._template is None or self._histogram is None:
+        if (
+            crop is None
+            or self._capture_template is None
+            or self._capture_histogram is None
+            or self._template is None
+            or self._histogram is None
+        ):
             return False
         sample = self._foreground_crop(crop)
         resized = cv2.resize(sample, (64, 64), interpolation=cv2.INTER_AREA)
@@ -147,20 +163,22 @@ class TargetVerifier:
             1,
             cv2.NORM_MINMAX,
         )
-        histogram_score = max(0.0, float(cv2.compareHist(self._histogram, histogram, cv2.HISTCMP_CORREL)))
-        template_gray = cv2.cvtColor(self._template, cv2.COLOR_BGR2GRAY)
-        resized_gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-        if float(template_gray.std()) < 2.0 or float(resized_gray.std()) < 2.0:
-            similarity = histogram_score
-        else:
-            template_score = float(cv2.matchTemplate(
-                resized_gray, template_gray, cv2.TM_CCOEFF_NORMED
-            )[0][0])
-            similarity = 0.5 * histogram_score + 0.5 * max(0.0, template_score)
-        if similarity >= self.min_similarity:
+        capture_similarity = self._similarity(
+            self._capture_template, self._capture_histogram, resized, histogram
+        )
+        adaptive_similarity = self._similarity(
+            self._template, self._histogram, resized, histogram
+        )
+        # Адаптация допустима только пока область похожа одновременно на то,
+        # что выбрал пилот, и на текущий рабочий вид этой же цели.
+        if (
+            capture_similarity >= self.min_similarity
+            and adaptive_similarity >= self.min_similarity
+        ):
             self._bad_frames = 0
             if self.method == "adaptive":
-                # Медленно обновляем образец только после уверенного совпадения.
+                # Медленно обновляем только рабочую модель. Исходная модель
+                # выше остаётся неизменяемой на весь цикл захвата.
                 rate = self.adaptation_rate
                 self._template = cv2.addWeighted(self._template, 1.0 - rate, resized, rate, 0)
                 self._histogram = cv2.addWeighted(self._histogram, 1.0 - rate,
@@ -169,8 +187,26 @@ class TargetVerifier:
         self._bad_frames += 1
         return self._bad_frames < self.max_bad_frames
 
+    @staticmethod
+    def _similarity(template: Any, reference_histogram: Any, resized: Any, histogram: Any) -> float:
+        """Считает комбинированную близость изображения и цветовой структуры."""
+        histogram_score = max(
+            0.0,
+            float(cv2.compareHist(reference_histogram, histogram, cv2.HISTCMP_CORREL)),
+        )
+        template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+        resized_gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+        if float(template_gray.std()) < 2.0 or float(resized_gray.std()) < 2.0:
+            return histogram_score
+        template_score = float(cv2.matchTemplate(
+            resized_gray, template_gray, cv2.TM_CCOEFF_NORMED
+        )[0][0])
+        return 0.5 * histogram_score + 0.5 * max(0.0, template_score)
+
     def reset(self) -> None:
         """Удаляет образец и состояние проверки цели."""
+        self._capture_template = None
+        self._capture_histogram = None
         self._template = None
         self._histogram = None
         self._bad_frames = 0

@@ -19,6 +19,7 @@ from src.interface.overlay import draw_overlay
 from src.interface.osd_config import load_osd_config
 from src.interface.betaflight_osd import draw_betaflight_osd, load_betaflight_osd_config
 from src.interface.web import FrameHub, start_web_preview
+from src.target.snapshot import save_capture_snapshot
 from src.target.tracker import TargetTracker
 from src.target.verifier import TargetVerifier
 from src.video.capture import VideoSource
@@ -47,15 +48,21 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def center_target(frame: object, box_size: int) -> TargetBox | None:
-    """Создаёт область захвата по центру кадра без ручного рисования мышью."""
+def center_target(frame: object, osd_config: object) -> TargetBox | None:
+    """Создаёт область захвата точно в видимой пилоту рамке OSD."""
     height, width = frame.shape[:2]
-    actual_size = min(box_size, width, height)
+    actual_size = min(osd_config.capture_box_size, width, height)
     if actual_size <= 0:
         return None
+    # Формула совпадает с draw_overlay(): сохранённая модель и рамка на J7
+    # должны описывать один и тот же участок исходного изображения.
+    center_x = round(width * osd_config.center_x_percent / 100) + osd_config.center_offset_x
+    center_y = round(height * osd_config.center_y_percent / 100) + osd_config.center_offset_y
+    box_center_x = center_x + osd_config.capture_box_offset_x
+    box_center_y = center_y + osd_config.capture_box_offset_y
     return TargetBox(
-        float(width // 2 - actual_size // 2),
-        float(height // 2 - actual_size // 2),
+        float(box_center_x - actual_size // 2),
+        float(box_center_y - actual_size // 2),
         float(actual_size),
         float(actual_size),
     )
@@ -222,7 +229,7 @@ def main() -> int:
             command = (web_command if web_command is not None else
                        remote_command_value if remote_command_value is not None else key_command)
             if command == Command.CAPTURE or command == 2:
-                selected = center_target(frame, osd_config.capture_box_size)
+                selected = center_target(frame, osd_config)
                 result = machine.handle(Command.CAPTURE, selected)
                 if result.accepted and selected is not None:
                     try:
@@ -231,6 +238,19 @@ def main() -> int:
                         machine.handle(Command.ABORT)
                         message = "TRACKER ERROR: TARGET RESET"
                     else:
+                        if follow_config.capture_snapshot.enabled:
+                            try:
+                                save_capture_snapshot(
+                                    frame,
+                                    selected,
+                                    follow_config.capture_snapshot.directory,
+                                )
+                            except (OSError, ValueError) as error:
+                                print(
+                                    f"[DronT16] Не удалось сохранить модель цели: {error}",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
                         message = result.message
                         range_estimator.reset()
                         message = "CAPTURE MODE"

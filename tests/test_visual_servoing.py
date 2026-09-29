@@ -51,11 +51,21 @@ def config(**overrides: object) -> VisualServoConfig:
         "altitude_hold_s": 0.1,
         "altitude_tolerance_m": 0.2,
         "vario_tolerance_m_s": 0.3,
+        "altitude_reference_window_s": 0.0,
+        "altitude_reference_max_vario_m_s": 0.2,
+        "altitude_reference_max_tilt_deg": 6.0,
+        "altitude_guard_error_m": 0.2,
+        "altitude_guard_vario_m_s": 0.3,
+        "altitude_authority_hard_error_m": 0.6,
+        "altitude_authority_hard_vario_m_s": 0.9,
+        "altitude_heading_min_authority": 0.25,
         "altitude_kp": 80.0,
         "altitude_ki": 12.0,
         "altitude_vario_gain": 35.0,
         "altitude_integral_limit": 2.0,
+        "altitude_integral_activation_s": 0.1,
         "throttle_max_correction": 120,
+        "throttle_slew_per_s": 200.0,
         "pitch_deadband": 0.05,
         "pitch_kp": 6.0,
         "pitch_kd": 0.0,
@@ -74,6 +84,8 @@ def config(**overrides: object) -> VisualServoConfig:
         "coordinated_yaw_kp": 6.0,
         "coordinated_yaw_max_correction": 60,
         "coordinated_yaw_direction": 1.0,
+        "yaw_error_alpha": 1.0,
+        "yaw_slew_per_s": 240.0,
         "roll_thrust_compensation_enabled": True,
         "hover_learning_alpha": 0.1,
         "hover_learning_max_vario_m_s": 0.2,
@@ -143,8 +155,92 @@ class VisualServoTests(unittest.TestCase):
         )
         self.assertGreater(moved.computed_channels[1], 992)
 
+    def test_follow_waits_for_a_stable_altitude_reference(self) -> None:
+        """FOLLOW не перехватывает CH1–CH4, пока пилот ещё набирает высоту."""
+        controller = VisualServoController(
+            config(output_mode="real", altitude_reference_window_s=0.10)
+        )
+        frame, channels = rc_frame(throttle=1100)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+
+        climbing = controller.process(
+            frame, channels, "FOLLOW", target(0.1), sensor(0.1, vario=0.5), 0.1, armed=True
+        )
+        self.assertEqual(climbing.state, VisualServoState.ALTITUDE_HOLD)
+        self.assertFalse(climbing.output_applied)
+        self.assertEqual(climbing.output_frame, frame)
+
+        ready = controller.process(
+            frame, channels, "FOLLOW", target(0.2), sensor(0.2), 0.2, armed=True
+        )
+        self.assertTrue(ready.output_applied)
+        self.assertTrue(any(event.startswith("FOLLOW -> ALTITUDE_HOLD") for event in ready.events))
+
+    def test_altitude_priority_weakens_but_does_not_cancel_follow(self) -> None:
+        """Ошибка высоты ослабляет дугу, сохраняя FOLLOW и направление к цели."""
+        controller = VisualServoController(
+            config(output_mode="real", roll_follow_enabled=True)
+        )
+        frame, channels = rc_frame(throttle=1100)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.1), sensor(0.1), 0.1, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.16), sensor(0.16), 0.16, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.27), sensor(0.27), 0.27, armed=True)
+
+        guarded = controller.process(
+            frame,
+            channels,
+            "FOLLOW",
+            target(0.38, x=1.0),
+            sensor(0.38, altitude=2.5, vario=0.4),
+            0.38,
+            armed=True,
+        )
+        self.assertEqual(guarded.state, VisualServoState.FOLLOW)
+        self.assertGreater(guarded.computed_channels[0], 992)
+        self.assertGreater(guarded.computed_channels[3], 992)
+        self.assertTrue(any(event.startswith("ALTITUDE_PRIORITY") for event in guarded.events))
+
+    def test_hard_altitude_priority_centers_lateral_motion_but_keeps_heading(self) -> None:
+        """Большая вертикальная ошибка оставляет FOLLOW и малую поправку курса."""
+        controller = VisualServoController(
+            config(output_mode="real", roll_follow_enabled=True)
+        )
+        frame, channels = rc_frame(throttle=1100)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.1), sensor(0.1), 0.1, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.16), sensor(0.16), 0.16, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.27), sensor(0.27), 0.27, armed=True)
+
+        guarded = controller.process(
+            frame,
+            channels,
+            "FOLLOW",
+            target(0.38, x=1.0),
+            sensor(0.38, altitude=2.8, vario=1.0),
+            0.38,
+            armed=True,
+        )
+        self.assertEqual(guarded.state, VisualServoState.FOLLOW)
+        self.assertEqual(guarded.computed_channels[0], 992)
+        self.assertGreater(guarded.computed_channels[3], 992)
+
+    def test_throttle_command_is_slewed(self) -> None:
+        """Даже большая ошибка высоты не создаёт резкий скачок CH3."""
+        controller = VisualServoController(
+            config(output_mode="real", throttle_slew_per_s=100.0)
+        )
+        frame, channels = rc_frame(throttle=1000)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.1), sensor(0.1), 0.1, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.16), sensor(0.16), 0.16, armed=True)
+        result = controller.process(
+            frame, channels, "FOLLOW", target(0.22), sensor(0.22, altitude=0.0), 0.22, armed=True
+        )
+        self.assertLessEqual(result.computed_channels[2], 1012)
+
     def test_coordinated_yaw_and_altitude_commands_are_limited(self) -> None:
-        """Помощь yaw всегда меньше крена и не выходит за ограничение."""
+        """Прямой yaw по ошибке изображения остаётся ограниченным."""
         controller = VisualServoController(
             config(
                 output_mode="real",
@@ -164,13 +260,83 @@ class VisualServoTests(unittest.TestCase):
             frame, channels, "FOLLOW", target(0.3, x=1.0), sensor(0.3, altitude=2.0), 0.3, armed=True
         )
         changed = controller.process(
-            frame, channels, "FOLLOW", target(0.4, x=1.0), sensor(0.4, altitude=0.0), 0.4, armed=True
+            frame, channels, "FOLLOW", target(0.4, x=1.0), sensor(0.4, altitude=2.0), 0.4, armed=True
         )
         self.assertGreater(changed.computed_channels[0], 992)
         self.assertGreater(changed.computed_channels[3], 992)
         self.assertLessEqual(changed.computed_channels[3], 992 + 60)
         self.assertLessEqual(changed.computed_channels[2], 1220)
         self.assertEqual(extract_raw_frames(bytearray(changed.output_frame)), [changed.output_frame])
+
+    def test_follow_combines_roll_yaw_and_pitch(self) -> None:
+        """При боковой ошибке крен, yaw и движение к цели выдаются вместе."""
+        controller = VisualServoController(
+            config(
+                output_mode="real",
+                roll_follow_enabled=True,
+                coordinated_yaw_kp=140.0,
+                coordinated_yaw_max_correction=120,
+                roll_thrust_compensation_enabled=False,
+            )
+        )
+        frame, channels = rc_frame(throttle=1100)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.1), sensor(0.1), 0.1, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.2), sensor(0.2), 0.2, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.3), sensor(0.3), 0.3, armed=True)
+        result = controller.process(
+            frame,
+            channels,
+            "FOLLOW",
+            target(0.4, x=0.6, scale=2.0),
+            sensor(0.4),
+            0.4,
+            armed=True,
+        )
+        self.assertEqual(result.state, VisualServoState.FOLLOW)
+        self.assertGreater(result.computed_channels[0], 992)  # крен вправо
+        self.assertGreater(result.computed_channels[3], 992)  # yaw вправо
+        self.assertGreater(result.computed_channels[1], 992)  # движение к цели
+
+    def test_altitude_hold_keeps_yaw_centered_for_off_center_target(self) -> None:
+        """До FOLLOW объект сбоку не имеет права повернуть нос дрона."""
+        controller = VisualServoController(
+            config(output_mode="real", altitude_hold_s=1.0, coordinated_yaw_kp=140.0)
+        )
+        frame, channels = rc_frame(throttle=1100)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+        held = controller.process(
+            frame, channels, "FOLLOW", target(0.1, x=1.0), sensor(0.1), 0.1, armed=True
+        )
+        self.assertEqual(held.state, VisualServoState.ALTITUDE_HOLD)
+        self.assertEqual(held.computed_channels[3], 992)
+
+    def test_follow_yaw_is_smoothed_and_slewed(self) -> None:
+        """Yaw не перескакивает из центра к пределу за один видеокадр."""
+        controller = VisualServoController(
+            config(
+                output_mode="real",
+                roll_follow_enabled=True,
+                altitude_hold_s=0.0,
+                coordinated_yaw_kp=140.0,
+                coordinated_yaw_max_correction=120,
+                yaw_error_alpha=1.0,
+                yaw_slew_per_s=100.0,
+            )
+        )
+        frame, channels = rc_frame(throttle=1100)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.1), sensor(0.1), 0.1, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.2), sensor(0.2), 0.2, armed=True)
+        moved = controller.process(
+            frame, channels, "FOLLOW", target(0.3, x=1.0), sensor(0.3), 0.3, armed=True
+        )
+        self.assertEqual(moved.state, VisualServoState.FOLLOW)
+        self.assertEqual(moved.computed_channels[3], 1002)
+        centered = controller.process(
+            frame, channels, "FOLLOW", target(0.4, x=0.0), sensor(0.4), 0.4, armed=True
+        )
+        self.assertEqual(centered.computed_channels[3], 992)
 
     def test_follow_roll_tracks_horizontal_target_with_limits(self) -> None:
         """В FOLLOW CH1 получает ограниченный крен по смещению цели."""
@@ -187,7 +353,7 @@ class VisualServoTests(unittest.TestCase):
         )
         self.assertGreater(moved.computed_channels[0], 992)
         self.assertLessEqual(moved.computed_channels[0], 992 + 6 * 18)
-        self.assertGreater(moved.computed_channels[2], 1100)
+        self.assertGreaterEqual(moved.computed_channels[2], 1100)
 
     def test_follow_roll_deadband_returns_to_level(self) -> None:
         """При цели в центре боковой крен возвращается к нулевому углу."""
@@ -230,7 +396,7 @@ class VisualServoTests(unittest.TestCase):
 
     def test_alignment_corrects_measured_roll_and_pitch(self) -> None:
         """До движения к цели корпус выравнивается по фактическим углам MSP."""
-        controller = VisualServoController(config())
+        controller = VisualServoController(config(altitude_reference_max_tilt_deg=20.0))
         frame, channels = rc_frame()
         result = controller.process(
             frame,

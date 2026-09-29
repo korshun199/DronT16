@@ -36,6 +36,7 @@ class MspConfig:
 
     enabled: bool
     transport: str
+    allow_real_control: bool
     serial_port: str
     baudrate: int
 
@@ -57,6 +58,14 @@ class TrackerConfig:
     """Выбранный алгоритм движения области цели."""
 
     algorithm: str
+
+
+@dataclass(frozen=True)
+class CaptureSnapshotConfig:
+    """Настройки единственного снимка модели цели в момент захвата."""
+
+    enabled: bool
+    directory: str
 
 
 @dataclass(frozen=True)
@@ -88,6 +97,7 @@ class FollowConfig:
     msp: MspConfig
     verification: VerificationConfig
     tracker: TrackerConfig
+    capture_snapshot: CaptureSnapshotConfig
     control: TargetControlConfig
     range: RangeConfig
 
@@ -132,6 +142,7 @@ def load_follow_config(path: str | Path) -> FollowConfig:
             MspConfig(
                 bool(msp["enabled"]),
                 str(msp["transport"]),
+                bool(msp.get("allow_real_control", False)),
                 str(msp["serial_port"]),
                 int(msp["baudrate"]),
             ),
@@ -144,6 +155,10 @@ def load_follow_config(path: str | Path) -> FollowConfig:
                 float(verification.get("foreground_margin_percent", 15.0)),
             ),
             TrackerConfig(str(raw.get("tracker", {}).get("algorithm", "csrt"))),
+            CaptureSnapshotConfig(
+                bool(raw.get("capture_snapshot", {}).get("enabled", True)),
+                str(raw.get("capture_snapshot", {}).get("directory", "diagnostics/targets")),
+            ),
             TargetControlConfig(
                 bool(raw.get("control", {}).get("enabled", False)),
                 str(raw.get("control", {}).get("target_state_file", "/tmp/dront16_target.json")),
@@ -163,8 +178,12 @@ def load_follow_config(path: str | Path) -> FollowConfig:
         raise ValueError("Угол обзора камеры должен быть от 0 до 180 градусов")
     if result.guidance.report_period_ms <= 0:
         raise ValueError("report_period_ms должен быть положительным")
-    if result.msp.transport != "dry-run" or result.msp.enabled:
-        raise ValueError("До отдельного разрешения MSP должен оставаться в режиме dry-run")
+    if result.msp.transport not in {"dry-run", "real"}:
+        raise ValueError("follow.msp.transport должен быть dry-run или real")
+    if (result.msp.transport == "real" or result.msp.enabled) and not result.msp.allow_real_control:
+        raise ValueError(
+            "Для real MSP требуется явное разрешение follow.msp.allow_real_control = true"
+        )
     if not 0 < result.verification.min_similarity <= 1:
         raise ValueError("min_similarity должен быть больше 0 и не больше 1")
     if result.verification.max_bad_frames <= 0:
@@ -177,6 +196,8 @@ def load_follow_config(path: str | Path) -> FollowConfig:
         raise ValueError("foreground_margin_percent должен быть от 0 до 50")
     if result.tracker.algorithm not in {"csrt", "kcf", "mil"}:
         raise ValueError("algorithm должен быть csrt, kcf или mil")
+    if not result.capture_snapshot.directory.strip():
+        raise ValueError("capture_snapshot.directory не должен быть пустым")
     if result.control.max_age_ms <= 0:
         raise ValueError("target_max_age_ms должен быть положительным")
     if result.range.horizontal_deadband_percent < 0 or result.range.size_change_deadband_percent < 0:

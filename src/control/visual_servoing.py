@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import math
+import statistics
 from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping
@@ -56,11 +57,21 @@ class VisualServoConfig:
     altitude_hold_s: float
     altitude_tolerance_m: float
     vario_tolerance_m_s: float
+    altitude_reference_window_s: float
+    altitude_reference_max_vario_m_s: float
+    altitude_reference_max_tilt_deg: float
+    altitude_guard_error_m: float
+    altitude_guard_vario_m_s: float
+    altitude_authority_hard_error_m: float
+    altitude_authority_hard_vario_m_s: float
+    altitude_heading_min_authority: float
     altitude_kp: float
     altitude_ki: float
     altitude_vario_gain: float
     altitude_integral_limit: float
+    altitude_integral_activation_s: float
     throttle_max_correction: int
+    throttle_slew_per_s: float
     pitch_deadband: float
     pitch_kp: float
     pitch_kd: float
@@ -79,6 +90,8 @@ class VisualServoConfig:
     coordinated_yaw_kp: float
     coordinated_yaw_max_correction: int
     coordinated_yaw_direction: float
+    yaw_error_alpha: float
+    yaw_slew_per_s: float
     roll_thrust_compensation_enabled: bool
     hover_learning_alpha: float
     hover_learning_max_vario_m_s: float
@@ -105,8 +118,23 @@ class VisualServoConfig:
             raise ValueError("Коэффициенты сглаживания должны быть в диапазоне (0, 1]")
         if self.altitude_hold_s < 0:
             raise ValueError("Время подтверждения состояния не может быть отрицательным")
+        if self.altitude_reference_window_s < 0:
+            raise ValueError("Окно усреднения исходной высоты не может быть отрицательным")
+        if self.altitude_reference_max_vario_m_s < 0 or self.altitude_reference_max_tilt_deg < 0:
+            raise ValueError("Пределы спокойного полёта не могут быть отрицательными")
+        if self.altitude_guard_error_m <= 0 or self.altitude_guard_vario_m_s <= 0:
+            raise ValueError("Пределы защиты высоты должны быть положительными")
+        if (
+            self.altitude_authority_hard_error_m <= self.altitude_guard_error_m
+            or self.altitude_authority_hard_vario_m_s <= self.altitude_guard_vario_m_s
+        ):
+            raise ValueError("Жёсткие пределы приоритета высоты должны быть больше мягких")
+        if not 0 <= self.altitude_heading_min_authority <= 1:
+            raise ValueError("Минимальная власть курса должна быть в диапазоне 0..1")
         if self.altitude_integral_limit < 0:
             raise ValueError("Ограничение интегратора не может быть отрицательным")
+        if self.altitude_integral_activation_s < 0 or self.throttle_slew_per_s <= 0:
+            raise ValueError("Параметры плавного газа должны быть положительными")
         if self.attitude_kp <= 0 or self.attitude_max_correction <= 0:
             raise ValueError("Параметры контура горизонта должны быть положительными")
         if self.pitch_max_angle_deg <= 0 or self.roll_follow_max_angle_deg <= 0:
@@ -119,6 +147,8 @@ class VisualServoConfig:
             raise ValueError("Скорость изменения команды roll должна быть положительной")
         if self.coordinated_yaw_kp < 0 or self.coordinated_yaw_max_correction < 0:
             raise ValueError("Параметры координированного yaw не могут быть отрицательными")
+        if not 0 < self.yaw_error_alpha <= 1 or self.yaw_slew_per_s <= 0:
+            raise ValueError("Сглаживание и скорость yaw должны быть положительными")
         if not self.rc_min <= self.hover_learning_min_throttle < self.hover_learning_max_throttle <= self.rc_max:
             raise ValueError("Неверный диапазон обучения газа висения")
 
@@ -156,11 +186,21 @@ def build_visual_servo_config(
         altitude_hold_s=float(section["altitude_hold_s"]),
         altitude_tolerance_m=float(section["altitude_tolerance_m"]),
         vario_tolerance_m_s=float(section["vario_tolerance_m_s"]),
+        altitude_reference_window_s=float(section["altitude_reference_window_s"]),
+        altitude_reference_max_vario_m_s=float(section["altitude_reference_max_vario_m_s"]),
+        altitude_reference_max_tilt_deg=float(section["altitude_reference_max_tilt_deg"]),
+        altitude_guard_error_m=float(section["altitude_guard_error_m"]),
+        altitude_guard_vario_m_s=float(section["altitude_guard_vario_m_s"]),
+        altitude_authority_hard_error_m=float(section["altitude_authority_hard_error_m"]),
+        altitude_authority_hard_vario_m_s=float(section["altitude_authority_hard_vario_m_s"]),
+        altitude_heading_min_authority=float(section["altitude_heading_min_authority"]),
         altitude_kp=float(section["altitude_kp"]),
         altitude_ki=float(section["altitude_ki"]),
         altitude_vario_gain=float(section["altitude_vario_gain"]),
         altitude_integral_limit=float(section["altitude_integral_limit"]),
+        altitude_integral_activation_s=float(section["altitude_integral_activation_s"]),
         throttle_max_correction=int(section["throttle_max_correction"]),
+        throttle_slew_per_s=float(section["throttle_slew_per_s"]),
         pitch_deadband=float(section["pitch_deadband"]),
         pitch_kp=float(section["pitch_kp"]),
         pitch_kd=float(section["pitch_kd"]),
@@ -179,6 +219,8 @@ def build_visual_servo_config(
         coordinated_yaw_kp=float(section["coordinated_yaw_kp"]),
         coordinated_yaw_max_correction=int(section["coordinated_yaw_max_correction"]),
         coordinated_yaw_direction=float(section["coordinated_yaw_direction"]),
+        yaw_error_alpha=float(section["yaw_error_alpha"]),
+        yaw_slew_per_s=float(section["yaw_slew_per_s"]),
         roll_thrust_compensation_enabled=bool(section["roll_thrust_compensation_enabled"]),
         hover_learning_alpha=float(section["hover_learning_alpha"]),
         hover_learning_max_vario_m_s=float(section["hover_learning_max_vario_m_s"]),
@@ -213,17 +255,24 @@ class VisualServoController:
         self.state = VisualServoState.DIRECT
         self.hover_reference: float | None = None
         self.hold_altitude_m: float | None = None
+        self._reference_started_at: float | None = None
+        self._reference_altitudes: list[float] = []
+        self._reference_throttles: list[float] = []
         self.scale_reference: float | None = None
         self.altitude_integral = 0.0
         self.last_time: float | None = None
         self.last_roll_error = 0.0
         self.last_roll_rate_correction = 0.0
+        self.last_yaw_correction = 0.0
         self.last_scale_error = 0.0
         self.filtered_roll_derivative = 0.0
+        self.filtered_yaw_error = 0.0
         self.filtered_scale_derivative = 0.0
         self.state_started_at: float | None = None
         self.last_calculation_at: float | None = None
         self.last_control_values: tuple[int, int, int, int] | None = None
+        self.last_throttle_command: float | None = None
+        self._last_altitude_log_at: float | None = None
         self._fault_latched = False
         self._target_lost_latched = False
         self._sensor_stale_count = 0
@@ -354,12 +403,24 @@ class VisualServoController:
             )
 
         events: list[str] = restored_events
-        if self.state in {VisualServoState.DIRECT, VisualServoState.CAPTURE}:
+        starting_follow = self.state in {VisualServoState.DIRECT, VisualServoState.CAPTURE}
+        if starting_follow:
             self._start_follow(live_channels, target, sensor, now)
-            events.append(
-                f"FOLLOW -> ALTITUDE_HOLD: altitude={self.hold_altitude_m:.2f}m "
-                f"scale={self.scale_reference:.3f}% hover={self.hover_reference:.0f}"
-            )
+
+        # Не фиксируем высоту и газ одним кадром в момент перевода CH6.
+        # Пока пилот ещё набирает/снижает высоту, его RC-кадр проходит без
+        # изменений: RPI ждёт спокойный участок и только затем перехватывает
+        # CH1–CH4 для FOLLOW.
+        if self.hold_altitude_m is None:
+            if self._collect_altitude_reference(live_channels, sensor, now):
+                events.append(
+                    f"FOLLOW -> ALTITUDE_HOLD: altitude={self.hold_altitude_m:.2f}m "
+                    f"scale={self.scale_reference:.3f}% hover={self.hover_reference:.0f}"
+                )
+            else:
+                if starting_follow:
+                    events.append("FOLLOW: ожидание спокойной высоты и газа пилота")
+                return VisualServoResult(frame, self.state, tuple(events), live_channels, False)
 
         if (
             self.last_calculation_at is not None
@@ -383,11 +444,30 @@ class VisualServoController:
         dt = self._step_time(now)
         ex = float(target.normalized_x or 0.0)
         scale = float(target.scale_percent or cfg.min_scale_percent)
-        follow_roll_target = 0.0
+        lateral_authority, heading_authority = self._follow_authority(sensor)
+        desired_roll_target = 0.0
         if self.state is VisualServoState.FOLLOW and cfg.roll_follow_enabled:
-            follow_roll_target = self._roll_target_deg(ex, dt)
-        yaw_command = self._coordinated_yaw_command(follow_roll_target)
-        throttle_command = self._altitude_command(sensor, dt, follow_roll_target)
+            # Высота не выключает сопровождение скачком. Чем сильнее отклонение
+            # высоты/вариометра, тем меньше крен и pitch; CH3 в это время
+            # продолжает возвращать дрон к H_ref по реальным данным MSP.
+            desired_roll_target = self._roll_target_deg(ex, dt)
+        follow_roll_target = desired_roll_target * lateral_authority
+        # До FOLLOW система только собирает и удерживает спокойную опору
+        # высоты. Нос остаётся по центру: управление траекторией начинается
+        # строго после подтверждённого перехода ALTITUDE_HOLD -> FOLLOW.
+        yaw_command = cfg.rc_center
+        if self.state is VisualServoState.FOLLOW:
+            # Yaw и крен получают одну ошибку изображения: дрон продолжает
+            # идти вперёд, смещается креном и поворачивает нос к цели.
+            yaw_command = self._coordinated_yaw_command(ex, heading_authority, dt)
+        else:
+            self.last_yaw_correction = 0.0
+            self.filtered_yaw_error = 0.0
+        integral_allowed = self._altitude_is_stable(sensor) and (
+            self._state_age(now) >= cfg.altitude_integral_activation_s
+        )
+        raw_throttle_command = self._altitude_command(sensor, dt, integrate=integral_allowed)
+        throttle_command = self._slew_throttle(raw_throttle_command, dt)
         output_channels = list(live_channels)
         # В ACRO CH1 задаёт угловую скорость. Raspberry замыкает внешний
         # контур по фактическому roll из MSP, а Betaflight стабилизирует rate.
@@ -423,20 +503,35 @@ class VisualServoController:
             if cfg.roll_follow_enabled:
                 events.append(
                     f"FOLLOW: roll target={follow_roll_target:.2f}deg "
-                    f"error_x={ex:+.3f}"
+                    f"error_x={ex:+.3f} authority={lateral_authority:.2f}"
                 )
-            target_pitch_deg = self._pitch_target_deg(scale, dt)
+            target_pitch_deg = self._pitch_target_deg(scale, dt) * lateral_authority
             output_channels[cfg.pitch_channel] = self._attitude_command(
                 sensor.pitch_deg, target_pitch_deg, cfg.pitch_rc_direction
             )
-            roll_tracking_error = abs(sensor.roll_deg - follow_roll_target)
-            if roll_tracking_error > cfg.level_roll_tolerance_deg:
-                # Заданный крен сам по себе не является ошибкой: блокировка
-                # нужна только если фактический roll заметно не следует цели.
-                output_channels[cfg.pitch_channel] = self._attitude_command(
-                    sensor.pitch_deg, 0.0, cfg.pitch_rc_direction
+            # Продольное движение не блокируется ожиданием выхода на roll.
+            # В сопровождении крен, yaw и pitch должны работать одновременно:
+            # дрон корректирует боковую траекторию и продолжает идти к цели.
+            if lateral_authority < 1.0:
+                events.append(
+                    "ALTITUDE_PRIORITY: "
+                    f"height_error={self.hold_altitude_m - sensor.altitude_m:+.2f}m "
+                    f"vario={float(sensor.vario_m_s or 0.0):+.2f}m/s "
+                    f"lateral={lateral_authority:.2f} heading={heading_authority:.2f}"
                 )
-                events.append("FOLLOW: pitch заблокирован до захвата заданного roll")
+
+        if (
+            self._last_altitude_log_at is None
+            or now - self._last_altitude_log_at >= 0.25
+        ):
+            self._last_altitude_log_at = now
+            events.append(
+                "ALTITUDE: "
+                f"target={self.hold_altitude_m:.2f}m current={sensor.altitude_m:.2f}m "
+                f"error={self.hold_altitude_m - sensor.altitude_m:+.2f}m "
+                f"vario={float(sensor.vario_m_s or 0.0):+.2f}m/s "
+                f"hover={self.hover_reference:.0f} raw={raw_throttle_command} CH3={throttle_command}"
+            )
 
         computed_channels = tuple(self._clamp_rc(value) for value in output_channels)
         self.last_control_values = (
@@ -456,40 +551,51 @@ class VisualServoController:
         sensor: SensorSample,
         now: float,
     ) -> None:
-        """Фиксирует высоту и масштаб, затем начинает безопасную стабилизацию."""
+        """Начинает сбор спокойной опоры высоты перед автоматическим FOLLOW."""
         cfg = self.config
         self.state = VisualServoState.ALTITUDE_HOLD
-        self.hold_altitude_m = float(sensor.altitude_m if sensor.altitude_m is not None else 0.0)
+        self.hold_altitude_m = None
+        self._reference_started_at = now
+        self._reference_altitudes = []
+        self._reference_throttles = []
         self.scale_reference = float(target.scale_percent or cfg.min_scale_percent)
-        if self.hover_reference is None:
-            self.hover_reference = float(channels[cfg.throttle_channel])
-        self.hover_reference = float(self._clamp_rc(round(self.hover_reference)))
         self.altitude_integral = 0.0
         self.last_time = now
         self.last_roll_error = float(target.normalized_x or 0.0)
         self.last_roll_rate_correction = 0.0
+        self.last_yaw_correction = 0.0
         self.last_scale_error = 0.0
         self.filtered_roll_derivative = 0.0
+        self.filtered_yaw_error = 0.0
         self.filtered_scale_derivative = 0.0
         self.state_started_at = now
         self.last_calculation_at = None
         self.last_control_values = None
+        self.last_throttle_command = None
+        self._last_altitude_log_at = None
 
     def _reset(self, state: VisualServoState) -> tuple[str, ...]:
         """Сбрасывает автономные опоры после выхода из FOLLOW или DISARM."""
         previous = self.state
         self.state = state
         self.hold_altitude_m = None
+        self._reference_started_at = None
+        self._reference_altitudes = []
+        self._reference_throttles = []
         self.scale_reference = None
         self.altitude_integral = 0.0
         self.last_time = None
         self.last_roll_error = 0.0
         self.last_roll_rate_correction = 0.0
+        self.last_yaw_correction = 0.0
         self.filtered_roll_derivative = 0.0
+        self.filtered_yaw_error = 0.0
         self.filtered_scale_derivative = 0.0
         self.state_started_at = None
         self.last_calculation_at = None
         self.last_control_values = None
+        self.last_throttle_command = None
+        self._last_altitude_log_at = None
         self._fault_latched = False
         self._target_lost_latched = False
         self._sensor_stale_count = 0
@@ -533,6 +639,83 @@ class VisualServoController:
             alpha = cfg.hover_learning_alpha
             self.hover_reference = alpha * throttle + (1.0 - alpha) * self.hover_reference
 
+    def _collect_altitude_reference(
+        self,
+        channels: tuple[int, ...],
+        sensor: SensorSample,
+        now: float,
+    ) -> bool:
+        """Усредняет высоту и газ только на спокойном участке ручного полёта."""
+        cfg = self.config
+        stable = (
+            abs(float(sensor.vario_m_s or 0.0)) <= cfg.altitude_reference_max_vario_m_s
+            and abs(sensor.roll_deg or 0.0) <= cfg.altitude_reference_max_tilt_deg
+            and abs(sensor.pitch_deg or 0.0) <= cfg.altitude_reference_max_tilt_deg
+            and cfg.hover_learning_min_throttle
+            <= channels[cfg.throttle_channel]
+            <= cfg.hover_learning_max_throttle
+        )
+        if not stable:
+            self._reference_started_at = now
+            self._reference_altitudes = []
+            self._reference_throttles = []
+            return False
+        self._reference_altitudes.append(float(sensor.altitude_m or 0.0))
+        self._reference_throttles.append(float(channels[cfg.throttle_channel]))
+        started_at = self._reference_started_at if self._reference_started_at is not None else now
+        if now - started_at < cfg.altitude_reference_window_s:
+            return False
+        self.hold_altitude_m = statistics.median(self._reference_altitudes)
+        self.hover_reference = float(self._clamp_rc(round(statistics.median(self._reference_throttles))))
+        self.last_throttle_command = self.hover_reference
+        self._reference_started_at = None
+        self._reference_altitudes = []
+        self._reference_throttles = []
+        self.altitude_integral = 0.0
+        self.state_started_at = now
+        return True
+
+    def _altitude_is_stable(self, sensor: SensorSample) -> bool:
+        """Проверяет, можно ли считать вертикальное движение спокойным."""
+        cfg = self.config
+        reference = float(self.hold_altitude_m if self.hold_altitude_m is not None else sensor.altitude_m)
+        return (
+            abs(reference - float(sensor.altitude_m)) <= cfg.altitude_tolerance_m
+            and abs(float(sensor.vario_m_s or 0.0)) <= cfg.vario_tolerance_m_s
+        )
+
+    def _follow_authority(self, sensor: SensorSample) -> tuple[float, float]:
+        """Возвращает доли власти боковой дуги и курса по фактической вертикали.
+
+        Мягкие пределы означают начало плавного ослабления горизонтального
+        движения, жёсткие — его полную остановку. Состояние остаётся FOLLOW:
+        при восстановлении высоты траектория возобновляется без нового CH6.
+        """
+        cfg = self.config
+        reference = float(self.hold_altitude_m if self.hold_altitude_m is not None else sensor.altitude_m)
+        altitude_authority = self._linear_authority(
+            abs(reference - float(sensor.altitude_m)),
+            cfg.altitude_guard_error_m,
+            cfg.altitude_authority_hard_error_m,
+        )
+        vario_authority = self._linear_authority(
+            abs(float(sensor.vario_m_s or 0.0)),
+            cfg.altitude_guard_vario_m_s,
+            cfg.altitude_authority_hard_vario_m_s,
+        )
+        lateral_authority = min(altitude_authority, vario_authority)
+        heading_authority = max(cfg.altitude_heading_min_authority, lateral_authority)
+        return lateral_authority, heading_authority
+
+    @staticmethod
+    def _linear_authority(value: float, soft_limit: float, hard_limit: float) -> float:
+        """Плавно переводит измеренную ошибку в долю допустимой команды 0..1."""
+        if value <= soft_limit:
+            return 1.0
+        if value >= hard_limit:
+            return 0.0
+        return (hard_limit - value) / (hard_limit - soft_limit)
+
     def _step_time(self, now: float) -> float:
         """Возвращает ограниченный dt, устойчивый к паузам процесса."""
         previous = self.last_time
@@ -541,18 +724,42 @@ class VisualServoController:
             return 0.0
         return max(0.0, min(0.2, now - previous))
 
-    def _coordinated_yaw_command(self, roll_target_deg: float) -> int:
-        """Даёт небольшой yaw только как помощь крену на дуге траектории."""
+    def _coordinated_yaw_command(
+        self, horizontal_error: float, authority: float, dt: float
+    ) -> int:
+        """Наводит yaw прямо по горизонтальной ошибке цели.
+
+        Раньше yaw косвенно зависел от заданного roll. Это давало слишком
+        маленькую команду и не гарантировало, что нос начнёт смотреть к цели.
+        Теперь yaw и roll получают одну и ту же ошибку изображения, а
+        ``authority`` снижает боковую активность при приоритете высоты.
+        """
         cfg = self.config
-        if not cfg.coordinated_yaw_enabled or abs(roll_target_deg) <= 0.0:
-            return cfg.rc_center
-        correction = cfg.coordinated_yaw_direction * (
-            cfg.coordinated_yaw_kp * roll_target_deg
+        alpha = cfg.yaw_error_alpha
+        self.filtered_yaw_error = (
+            alpha * horizontal_error + (1.0 - alpha) * self.filtered_yaw_error
         )
-        correction = max(
+        requested = 0.0
+        if (
+            cfg.coordinated_yaw_enabled
+            and abs(self.filtered_yaw_error) > cfg.roll_follow_deadband
+        ):
+            requested = cfg.coordinated_yaw_direction * (
+                cfg.coordinated_yaw_kp
+                * self.filtered_yaw_error
+                * max(0.0, min(1.0, authority))
+            )
+        requested = max(
             -cfg.coordinated_yaw_max_correction,
-            min(cfg.coordinated_yaw_max_correction, correction),
+            min(cfg.coordinated_yaw_max_correction, requested),
         )
+        interval = cfg.control_period_s if dt <= 0.0 else dt
+        maximum_step = cfg.yaw_slew_per_s * interval
+        correction = max(
+            self.last_yaw_correction - maximum_step,
+            min(self.last_yaw_correction + maximum_step, requested),
+        )
+        self.last_yaw_correction = correction
         return self._clamp_rc(round(cfg.rc_center + correction))
 
     def _roll_target_deg(self, error: float, dt: float) -> float:
@@ -621,8 +828,8 @@ class VisualServoController:
         )
         return self._clamp_rc(round(cfg.rc_center + correction))
 
-    def _altitude_command(self, sensor: SensorSample, dt: float, roll_target_deg: float = 0.0) -> int:
-        """Удерживает высоту PI-контуром с демпфированием по вариометру."""
+    def _altitude_command(self, sensor: SensorSample, dt: float, *, integrate: bool) -> int:
+        """Рассчитывает газ: P и vario всегда, I только после стабилизации."""
         cfg = self.config
         reference = float(
             self.hold_altitude_m
@@ -631,7 +838,11 @@ class VisualServoController:
         )
         current = float(sensor.altitude_m if sensor.altitude_m is not None else reference)
         error = reference - current
-        self.altitude_integral += error * dt
+        if integrate:
+            self.altitude_integral += error * dt
+        else:
+            # Не храним старую ошибку, когда барометр ещё догоняет аппарат.
+            self.altitude_integral *= 0.92
         self.altitude_integral = max(
             -cfg.altitude_integral_limit,
             min(cfg.altitude_integral_limit, self.altitude_integral),
@@ -647,10 +858,27 @@ class VisualServoController:
         )
         hover = float(self.hover_reference or cfg.rc_center)
         command = hover + correction
-        if cfg.roll_thrust_compensation_enabled and abs(roll_target_deg) > 0.0:
-            cosine = max(0.90, math.cos(math.radians(roll_target_deg)))
-            command /= cosine
+        if cfg.roll_thrust_compensation_enabled:
+            # Компенсация работает по фактическому наклону FC, а не по одному
+            # намерению внешнего контура: учитываются и roll, и pitch.
+            vertical_projection = math.cos(math.radians(sensor.roll_deg or 0.0)) * math.cos(
+                math.radians(sensor.pitch_deg or 0.0)
+            )
+            command /= max(0.90, vertical_projection)
         return self._clamp_rc(round(command))
+
+    def _slew_throttle(self, requested: int, dt: float) -> int:
+        """Не даёт CH3 менять тягу резким скачком между двумя расчётами."""
+        cfg = self.config
+        previous = self.last_throttle_command
+        if previous is None:
+            previous = float(self.hover_reference or requested)
+        interval = cfg.control_period_s if dt <= 0.0 else dt
+        maximum_step = cfg.throttle_slew_per_s * interval
+        command = max(previous - maximum_step, min(previous + maximum_step, float(requested)))
+        command = float(self._clamp_rc(round(command)))
+        self.last_throttle_command = command
+        return int(command)
 
     def _state_age(self, now: float) -> float:
         """Возвращает время нахождения в текущем состоянии."""
