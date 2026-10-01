@@ -50,6 +50,8 @@ class TargetVerifierTests(unittest.TestCase):
             cv2.NORM_MINMAX,
         )
         self.assertFalse(verifier.verify(foreign, target))
+        self.assertEqual(verifier.last_failure_reason, "VERIFIER_REJECTED")
+        self.assertIn("bad_frames=1/1", verifier.diagnostic_detail())
 
 
 if __name__ == "__main__":

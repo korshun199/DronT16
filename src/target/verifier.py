@@ -31,6 +31,11 @@ class TargetVerifier:
         self._template: Any = None
         self._histogram: Any = None
         self._bad_frames = 0
+        # Последний результат оставляется доступным трекеру и журналу. Это
+        # позволяет отличить срыв CSRT от отказа проверки похожести цели.
+        self.last_capture_similarity: float | None = None
+        self.last_adaptive_similarity: float | None = None
+        self.last_failure_reason: str | None = None
         # Полный кадр в момент захвата нужен для оценки заполнения вне рамки.
         self._reference_frame: Any = None
 
@@ -67,6 +72,9 @@ class TargetVerifier:
         self._template = capture_template.copy()
         self._histogram = capture_histogram.copy()
         self._bad_frames = 0
+        self.last_capture_similarity = None
+        self.last_adaptive_similarity = None
+        self.last_failure_reason = None
 
     def _foreground_crop(self, crop: Any) -> Any:
         """Выделяет вероятную переднюю область и подавляет внешний фон."""
@@ -152,6 +160,7 @@ class TargetVerifier:
             or self._template is None
             or self._histogram is None
         ):
+            self.last_failure_reason = "VERIFIER_INPUT_INVALID"
             return False
         sample = self._foreground_crop(crop)
         resized = cv2.resize(sample, (64, 64), interpolation=cv2.INTER_AREA)
@@ -169,6 +178,8 @@ class TargetVerifier:
         adaptive_similarity = self._similarity(
             self._template, self._histogram, resized, histogram
         )
+        self.last_capture_similarity = capture_similarity
+        self.last_adaptive_similarity = adaptive_similarity
         # Адаптация допустима только пока область похожа одновременно на то,
         # что выбрал пилот, и на текущий рабочий вид этой же цели.
         if (
@@ -176,6 +187,7 @@ class TargetVerifier:
             and adaptive_similarity >= self.min_similarity
         ):
             self._bad_frames = 0
+            self.last_failure_reason = None
             if self.method == "adaptive":
                 # Медленно обновляем только рабочую модель. Исходная модель
                 # выше остаётся неизменяемой на весь цикл захвата.
@@ -185,7 +197,20 @@ class TargetVerifier:
                                                    histogram, rate, 0)
             return True
         self._bad_frames += 1
-        return self._bad_frames < self.max_bad_frames
+        if self._bad_frames >= self.max_bad_frames:
+            self.last_failure_reason = "VERIFIER_REJECTED"
+            return False
+        self.last_failure_reason = "VERIFIER_GRACE"
+        return True
+
+    def diagnostic_detail(self) -> str:
+        """Возвращает компактное объяснение последней проверки для журнала."""
+        capture = "n/a" if self.last_capture_similarity is None else f"{self.last_capture_similarity:.3f}"
+        adaptive = "n/a" if self.last_adaptive_similarity is None else f"{self.last_adaptive_similarity:.3f}"
+        return (
+            f"capture_similarity={capture} adaptive_similarity={adaptive} "
+            f"bad_frames={self._bad_frames}/{self.max_bad_frames}"
+        )
 
     @staticmethod
     def _similarity(template: Any, reference_histogram: Any, resized: Any, histogram: Any) -> float:
@@ -210,4 +235,7 @@ class TargetVerifier:
         self._template = None
         self._histogram = None
         self._bad_frames = 0
+        self.last_capture_similarity = None
+        self.last_adaptive_similarity = None
+        self.last_failure_reason = None
         self._reference_frame = None

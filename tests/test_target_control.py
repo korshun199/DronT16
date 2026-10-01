@@ -33,6 +33,25 @@ class TargetControlTests(unittest.TestCase):
             self.assertTrue(guidance.is_complete(guidance.updated_at + 0.1, 0.3, 0.05))
             self.assertEqual(guidance.scale_percent, 4.5)
 
+    def test_lost_snapshot_preserves_diagnostic_reason(self) -> None:
+        """Причина срыва трекера доходит до отдельного процесса моста."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "target.json"
+            write_target_guidance(
+                path,
+                valid=False,
+                yaw_error_deg=None,
+                pitch_error_deg=None,
+                mode="Цель потеряна",
+                loss_reason="VERIFIER_REJECTED",
+                loss_detail="bad_frames=16/16",
+            )
+            guidance = read_target_guidance(path)
+            self.assertIsNotNone(guidance)
+            assert guidance is not None
+            self.assertEqual(guidance.loss_reason, "VERIFIER_REJECTED")
+            self.assertEqual(guidance.loss_detail, "bad_frames=16/16")
+
     def test_invalid_snapshot_is_not_usable(self) -> None:
         """Повреждённый или отсутствующий файл не даёт старой команды."""
         with tempfile.TemporaryDirectory() as directory:

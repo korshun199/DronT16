@@ -39,6 +39,9 @@ class TargetTracker:
         self._tracker: Optional[Any] = None
         self._verifier = verifier
         self._algorithm = algorithm
+        # Последняя причина остановки сопровождения передаётся в общий журнал.
+        self.last_failure_reason: str | None = None
+        self.last_diagnostic_detail = "tracker=not_started"
 
     def start(self, frame: Any, target: TargetBox) -> None:
         """Запускает сопровождение на первом кадре захваченной области."""
@@ -54,20 +57,51 @@ class TargetTracker:
             raise RuntimeError("OpenCV не смог инициализировать сопровождение")
         if self._verifier is not None:
             self._verifier.start(frame, target)
+        self.last_failure_reason = None
+        self.last_diagnostic_detail = "tracker=started"
 
     def update(self, frame: Any) -> Optional[TargetBox]:
         """Возвращает новую область прежней цели или None при потере."""
         if self._tracker is None:
+            self.last_failure_reason = "TRACKER_NOT_ACTIVE"
+            self.last_diagnostic_detail = "tracker=not_active"
             return None
         success, box = self._tracker.update(frame)
         if not success:
             self._tracker = None
+            self.last_failure_reason = "TRACKER_UPDATE_FAILED"
+            self.last_diagnostic_detail = "csrt_update=false"
             return None
         x, y, width, height = box
         target = TargetBox(float(x), float(y), float(width), float(height))
+        frame_height, frame_width = frame.shape[:2]
+        if (
+            not target.is_valid()
+            or target.x < 0
+            or target.y < 0
+            or target.x + target.width > frame_width
+            or target.y + target.height > frame_height
+        ):
+            self._tracker = None
+            self.last_failure_reason = "TARGET_OUT_OF_FRAME"
+            self.last_diagnostic_detail = (
+                f"box=({target.x:.1f},{target.y:.1f},{target.width:.1f},{target.height:.1f}) "
+                f"frame={frame_width}x{frame_height}"
+            )
+            return None
         if self._verifier is not None and not self._verifier.verify(frame, target):
             self._tracker = None
+            self.last_failure_reason = self._verifier.last_failure_reason or "VERIFIER_REJECTED"
+            self.last_diagnostic_detail = self._verifier.diagnostic_detail()
             return None
+        detail = (
+            f"box=({target.x:.1f},{target.y:.1f},{target.width:.1f},{target.height:.1f}) "
+            f"frame={frame_width}x{frame_height}"
+        )
+        if self._verifier is not None:
+            detail = f"{detail} {self._verifier.diagnostic_detail()}"
+        self.last_failure_reason = None
+        self.last_diagnostic_detail = detail
         return target
 
     def object_area_percent(self, frame: Any, target: TargetBox) -> float | None:
@@ -87,3 +121,5 @@ class TargetTracker:
         self._tracker = None
         if self._verifier is not None:
             self._verifier.reset()
+        self.last_failure_reason = None
+        self.last_diagnostic_detail = "tracker=reset"

@@ -184,6 +184,10 @@ def main() -> int:
         if fullscreen:
             cv2.setWindowProperty("DronT16", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
     message = "LIVE"
+    # Причина потери хранится до нового захвата: мост успеет зафиксировать её
+    # в общем журнале, даже если сразу вернёт пилоту режим DIRECT.
+    target_loss_reason: str | None = None
+    target_loss_detail: str | None = None
 
     try:
         while True:
@@ -195,6 +199,8 @@ def main() -> int:
                     # Потеря цели сразу возвращает белый DIRECT. Старая
                     # отметка расстояния не существует как отдельный режим.
                     message = "PILOT DIRECT: TARGET LOST"
+                    target_loss_reason = tracker.last_failure_reason or "TRACKER_UPDATE_FAILED"
+                    target_loss_detail = tracker.last_diagnostic_detail
             if machine.mode is Mode.LOST:
                 # Потеря цели — это не новый автоматический режим. Рамка и
                 # цвет должны немедленно показать обычное ручное управление.
@@ -238,6 +244,8 @@ def main() -> int:
                         machine.handle(Command.ABORT)
                         message = "TRACKER ERROR: TARGET RESET"
                     else:
+                        target_loss_reason = None
+                        target_loss_detail = None
                         if follow_config.capture_snapshot.enabled:
                             try:
                                 save_capture_snapshot(
@@ -288,6 +296,8 @@ def main() -> int:
                     normalized_x=guidance.normalized_x,
                     normalized_y=guidance.normalized_y,
                     scale_percent=measurement.object_area_percent,
+                    loss_reason=None,
+                    loss_detail=tracker.last_diagnostic_detail,
                 )
             else:
                 # После отбоя или потери цели мост не должен использовать старые координаты.
@@ -300,6 +310,8 @@ def main() -> int:
                     normalized_x=None,
                     normalized_y=None,
                     scale_percent=None,
+                    loss_reason=target_loss_reason,
+                    loss_detail=target_loss_detail,
                 )
     finally:
         tracker.reset()

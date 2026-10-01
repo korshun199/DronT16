@@ -71,12 +71,17 @@ def config(**overrides: object) -> VisualServoConfig:
         "pitch_kd": 0.0,
         "pitch_max_angle_deg": 8.0,
         "pitch_direction": 1.0,
+        "forward_pitch_reference_enabled": True,
+        "forward_pitch_reference_max_deg": 6.0,
+        "pitch_rate_slew_per_s": 240.0,
         "roll_follow_enabled": False,
         "roll_follow_deadband": 0.04,
         "roll_follow_kp": 8.0,
         "roll_follow_kd": 0.4,
         "roll_follow_max_angle_deg": 8.0,
         "roll_follow_direction": 1.0,
+        "roll_brake_lookahead_s": 0.25,
+        "roll_brake_derivative_deadband": 0.03,
         "roll_angle_to_rate_kp": 18.0,
         "roll_rate_max_correction": 160,
         "roll_rate_slew_per_s": 480.0,
@@ -84,6 +89,7 @@ def config(**overrides: object) -> VisualServoConfig:
         "coordinated_yaw_kp": 6.0,
         "coordinated_yaw_max_correction": 60,
         "coordinated_yaw_direction": 1.0,
+        "coordinated_yaw_brake_kd": 0.0,
         "yaw_error_alpha": 1.0,
         "yaw_slew_per_s": 240.0,
         "roll_thrust_compensation_enabled": True,
@@ -369,6 +375,66 @@ class VisualServoTests(unittest.TestCase):
         self.assertEqual(centered.computed_channels[0], 992)
         self.assertEqual(centered.computed_channels[3], 992)
 
+    def test_follow_roll_brakes_before_target_crosses_center(self) -> None:
+        """Быстрое возвращение цели к центру создаёт ограниченный обратный крен."""
+        controller = VisualServoController(
+            config(
+                roll_follow_enabled=True,
+                roll_follow_kp=8.0,
+                roll_follow_kd=0.0,
+                roll_brake_lookahead_s=1.0,
+                roll_brake_derivative_deadband=0.0,
+                roll_angle_to_rate_kp=30.0,
+                roll_rate_max_correction=200,
+                roll_rate_slew_per_s=10000.0,
+            )
+        )
+        frame, channels = rc_frame()
+        controller.process(frame, channels, "FOLLOW", target(0.0), sensor(0.0), 0.0, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.11), sensor(0.11), 0.11, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.22), sensor(0.22), 0.22, armed=True)
+        moving_right = controller.process(
+            frame, channels, "FOLLOW", target(0.32, x=0.8), sensor(0.32), 0.32, armed=True
+        )
+        braking = controller.process(
+            frame, channels, "FOLLOW", target(0.42, x=0.05), sensor(0.42), 0.42, armed=True
+        )
+        self.assertGreater(moving_right.computed_channels[0], 992)
+        self.assertLess(braking.computed_channels[0], 992)
+
+    def test_follow_preserves_reference_pitch_when_scale_is_stable(self) -> None:
+        """Спокойный pitch пилота сохраняется как опора движения вперёд."""
+        controller = VisualServoController(
+            config(
+                altitude_hold_s=0.0,
+                forward_pitch_reference_enabled=True,
+                forward_pitch_reference_max_deg=6.0,
+                pitch_rate_slew_per_s=10000.0,
+            )
+        )
+        frame, channels = rc_frame()
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0, pitch=4.0), 0.0, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.1), sensor(0.1, pitch=4.0), 0.1, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.2), sensor(0.2, pitch=4.0), 0.2, armed=True)
+        result = controller.process(
+            frame, channels, "FOLLOW", target(0.3, scale=4.0), sensor(0.3, pitch=0.0), 0.3, armed=True
+        )
+        self.assertEqual(result.state, VisualServoState.FOLLOW)
+        self.assertGreater(result.computed_channels[1], 992)
+
+    def test_target_loss_reports_reason_from_video_module(self) -> None:
+        """Визуальный контур сохраняет точную причину, присланную камерой."""
+        controller = VisualServoController(config(output_mode="real"))
+        frame, channels = rc_frame()
+        invalid = TargetGuidance(
+            False, None, None, 0.1, "Цель потеряна", loss_reason="VERIFIER_REJECTED",
+            loss_detail="capture_similarity=0.120 adaptive_similarity=0.140 bad_frames=16/16",
+        )
+        result = controller.process(frame, channels, "FOLLOW", invalid, sensor(0.1), 0.1, armed=True)
+        self.assertEqual(result.state, VisualServoState.TARGET_LOST)
+        self.assertIn("reason=VERIFIER_REJECTED", result.events[0])
+        self.assertIn("bad_frames=16/16", result.events[0])
+
     def test_acro_roll_rate_command_is_limited_and_slewed(self) -> None:
         """В ACRO команда CH1 меняется ступенями и не превышает предел."""
         controller = VisualServoController(
@@ -396,7 +462,12 @@ class VisualServoTests(unittest.TestCase):
 
     def test_alignment_corrects_measured_roll_and_pitch(self) -> None:
         """До движения к цели корпус выравнивается по фактическим углам MSP."""
-        controller = VisualServoController(config(altitude_reference_max_tilt_deg=20.0))
+        controller = VisualServoController(
+            config(
+                altitude_reference_max_tilt_deg=20.0,
+                forward_pitch_reference_enabled=False,
+            )
+        )
         frame, channels = rc_frame()
         result = controller.process(
             frame,

@@ -26,6 +26,8 @@ class TargetGuidance:
     normalized_x: float | None = None
     normalized_y: float | None = None
     scale_percent: float | None = None
+    loss_reason: str | None = None
+    loss_detail: str | None = None
 
     def is_fresh(self, now: float, max_age_s: float) -> bool:
         """Проверяет, что снимок цели не устарел и содержит направление."""
@@ -57,6 +59,8 @@ def write_target_guidance(
     normalized_x: float | None = None,
     normalized_y: float | None = None,
     scale_percent: float | None = None,
+    loss_reason: str | None = None,
+    loss_detail: str | None = None,
 ) -> None:
     """Атомарно публикует направление цели для отдельного процесса-моста."""
     target_path = Path(path)
@@ -70,6 +74,10 @@ def write_target_guidance(
         "normalized_x": normalized_x,
         "normalized_y": normalized_y,
         "scale_percent": scale_percent,
+        # Причина нужна мосту, чтобы TARGET_LOST в общем журнале был
+        # диагностикой, а не безымянным исчезновением координат цели.
+        "loss_reason": loss_reason,
+        "loss_detail": loss_detail,
     }
     temporary = target_path.with_name(f".{target_path.name}.tmp")
     temporary.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
@@ -94,6 +102,12 @@ def read_target_guidance(path: str | Path) -> TargetGuidance | None:
             ),
             scale_percent=(
                 None if payload.get("scale_percent") is None else float(payload["scale_percent"])
+            ),
+            loss_reason=(
+                None if payload.get("loss_reason") is None else str(payload["loss_reason"])
+            ),
+            loss_detail=(
+                None if payload.get("loss_detail") is None else str(payload["loss_detail"])
             ),
         )
     except (FileNotFoundError, OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
