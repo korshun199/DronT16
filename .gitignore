@@ -25,6 +25,11 @@ diagnostics/*
 .env
 # Адрес конкретной Raspberry Pi хранится только на рабочем ноутбуке.
 config/deployment.toml
+
+# Личный скрипт восстановления чистой Raspberry Pi.
+# Владелец хранит его отдельно; в Git и на GitHub не публикуется.
+/scripts/bootstrap_rpi.sh
+
 .venv/
 __pycache__/
 *.pyc
