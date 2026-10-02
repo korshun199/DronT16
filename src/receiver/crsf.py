@@ -1,4 +1,4 @@
-"""Только чтение CRSF-пакетов от ELRS-приёмника через UART."""
+"""Чтение и передача проверенных CRSF-пакетов через UART."""
 
 from __future__ import annotations
 
@@ -13,8 +13,57 @@ from dataclasses import dataclass
 
 # Тип CRSF-пакета с 16 каналами по 11 бит.
 CRSF_RC_CHANNELS_PACKED = 0x16
+# Служебный кадр CRSF с RSSI, LQ и SNR радиолинии.
+CRSF_LINK_STATISTICS = 0x14
 # Максимальный размер кадра CRSF по спецификации.
 CRSF_MAX_FRAME_LENGTH = 64
+
+
+@dataclass(frozen=True)
+class CrsfLinkStatistics:
+    """Расшифрованные показатели радиолинии из служебного CRSF-кадра."""
+
+    # RSSI первой антенны восходящей линии, переданный приёмником.
+    uplink_rssi_1: int
+    # RSSI второй антенны восходящей линии, переданный приёмником.
+    uplink_rssi_2: int
+    # Качество восходящей линии в процентах.
+    uplink_link_quality: int
+    # Отношение сигнал/шум восходящей линии в дБ.
+    uplink_snr: int
+    # Номер активной антенны.
+    active_antenna: int
+    # Текущий режим радиочастоты.
+    rf_mode: int
+    # Мощность передатчика восходящей линии.
+    uplink_tx_power: int
+    # RSSI нисходящей линии.
+    downlink_rssi: int
+    # Качество нисходящей линии в процентах.
+    downlink_link_quality: int
+    # Отношение сигнал/шум нисходящей линии в дБ.
+    downlink_snr: int
+
+
+def parse_link_statistics(payload: bytes) -> CrsfLinkStatistics:
+    """Разбирает 10 байт CRSF LINK_STATISTICS в правильном порядке полей."""
+    if len(payload) != 10:
+        raise ValueError("CRSF LINK_STATISTICS должен содержать 10 байт")
+    # Поля SNR в протоколе являются знаковыми 8-битными значениями.
+    uplink_snr = int.from_bytes(payload[3:4], "little", signed=True)
+    downlink_snr = int.from_bytes(payload[9:10], "little", signed=True)
+    return CrsfLinkStatistics(
+        uplink_rssi_1=payload[0],
+        uplink_rssi_2=payload[1],
+        uplink_link_quality=payload[2],
+        uplink_snr=uplink_snr,
+        active_antenna=payload[4],
+        rf_mode=payload[5],
+        uplink_tx_power=payload[6],
+        downlink_rssi=payload[7],
+        downlink_link_quality=payload[8],
+        downlink_snr=downlink_snr,
+    )
 
 
 @dataclass(frozen=True)
@@ -41,6 +90,28 @@ def unpack_channels(payload: bytes) -> tuple[int, ...]:
         raise ValueError("CRSF RC_CHANNELS_PACKED должен содержать 22 байта")
     packed = int.from_bytes(payload, "little")
     return tuple((packed >> (11 * index)) & 0x07FF for index in range(16))
+
+
+def pack_channels(channels: tuple[int, ...] | list[int]) -> bytes:
+    """Упаковывает 16 каналов CRSF в стандартные 22 байта по 11 бит."""
+    if len(channels) != 16:
+        raise ValueError("CRSF RC_CHANNELS_PACKED должен содержать 16 каналов")
+    packed = 0
+    for index, value in enumerate(channels):
+        if not 0 <= int(value) <= 0x07FF:
+            raise ValueError(f"Канал CH{index + 1} вне диапазона CRSF: {value}")
+        packed |= int(value) << (11 * index)
+    return packed.to_bytes(22, "little")
+
+
+def rebuild_rc_frame(frame: bytes, channels: tuple[int, ...] | list[int]) -> bytes:
+    """Пересобирает RC-кадр с новыми каналами и корректной CRC8 CRSF."""
+    if len(frame) < 4 or frame[2] != CRSF_RC_CHANNELS_PACKED:
+        raise ValueError("Ожидался кадр CRSF RC_CHANNELS_PACKED")
+    payload = pack_channels(channels)
+    length = len(payload) + 2  # type + payload + CRC
+    body = bytes((frame[0], length, CRSF_RC_CHANNELS_PACKED)) + payload
+    return body + bytes((crc8_dvb_s2(body[2:]),))
 
 
 def extract_raw_frames(buffer: bytearray) -> list[bytes]:
@@ -77,7 +148,7 @@ def parse_frames(buffer: bytearray, now: float | None = None) -> list[ReceiverFr
 
 
 class CrsfReceiver:
-    """Открывает UART только на чтение и принимает RC-кадры CRSF."""
+    """Открывает UART для чтения либо для чтения и передачи CRSF."""
 
     def __init__(self, serial_port: str, baudrate: int, write_enabled: bool = False) -> None:
         """Открывает UART 8N1 на чтение или на чтение и передачу."""
@@ -127,9 +198,15 @@ class CrsfReceiver:
                 pass
         return parse_frames(buffer)
 
-    def read_raw_frames(self, buffer: bytearray) -> list[bytes]:
-        """Читает UART и возвращает полные CRC-проверенные кадры без изменения."""
-        ready, _, _ = select.select([self._fd], [], [], 0.05)
+    def read_raw_frames(self, buffer: bytearray, timeout_s: float = 0.05) -> list[bytes]:
+        """Читает UART и возвращает полные CRC-проверенные кадры без изменения.
+
+        ``timeout_s`` нужен независимому быстрому мосту: он уменьшает время
+        ожидания UART, не меняя стандартный режим диагностического чтения.
+        """
+        if timeout_s < 0:
+            raise ValueError("Тайм-аут чтения CRSF не может быть отрицательным")
+        ready, _, _ = select.select([self._fd], [], [], timeout_s)
         if ready:
             try:
                 chunk = os.read(self._fd, 4096)

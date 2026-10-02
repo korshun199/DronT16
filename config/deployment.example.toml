@@ -1,0 +1,21 @@
+# Шаблон карты подключения DronT16.
+# Скопировать в config/deployment.toml и указать фактический адрес Raspberry Pi.
+# Файл deployment.toml намеренно не добавляется в Git.
+
+[local]
+# Рабочий каталог проекта на ноутбуке.
+project_path = "/home/work/DronT16"
+
+[raspberry]
+# Имя хоста или локальный IP Raspberry Pi.
+host = "raspberrypi.local"
+# Пользователь Linux на Raspberry Pi.
+user = "oleg"
+# Рабочий каталог проекта на Raspberry Pi.
+project_path = "/home/oleg/DronT16"
+# Имя ключа на ноутбуке; сам ключ всегда находится вне проекта.
+ssh_key = "~/.ssh/id_ed25519"
+# Имя службы systemd.
+service = "dront16.service"
+# Рабочий журнал испытаний на Raspberry Pi.
+log_path = "/home/oleg/DronT16/simulator_filesafe.log"

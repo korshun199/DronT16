@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from src.configuration import load_project_config
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class MspConfig:
 
     enabled: bool
     transport: str
+    allow_real_control: bool
     serial_port: str
     baudrate: int
 
@@ -59,6 +61,34 @@ class TrackerConfig:
 
 
 @dataclass(frozen=True)
+class CaptureSnapshotConfig:
+    """Настройки единственного снимка модели цели в момент захвата."""
+
+    enabled: bool
+    directory: str
+
+
+@dataclass(frozen=True)
+class TargetControlConfig:
+    """Общий файл направления цели между видео и CRSF-мостом."""
+
+    enabled: bool
+    state_file: str
+    max_age_ms: int
+
+
+@dataclass(frozen=True)
+class RangeConfig:
+    """Настройки тестового определения смещения и относительной дальности."""
+
+    horizontal_deadband_percent: float
+    size_change_deadband_percent: float
+    smoothing_alpha: float
+    control_threshold_percent: float
+    report_period_ms: int
+
+
+@dataclass(frozen=True)
 class FollowConfig:
     """Полная конфигурация сопровождения."""
 
@@ -67,6 +97,9 @@ class FollowConfig:
     msp: MspConfig
     verification: VerificationConfig
     tracker: TrackerConfig
+    capture_snapshot: CaptureSnapshotConfig
+    control: TargetControlConfig
+    range: RangeConfig
 
 
 def _number(section: dict[str, Any], name: str) -> float:
@@ -81,11 +114,13 @@ def load_follow_config(path: str | Path) -> FollowConfig:
     """Загружает TOML и проверяет параметры до запуска сопровождения."""
     config_path = Path(path)
     try:
-        with config_path.open("rb") as config_file:
-            raw = tomllib.load(config_file)
-    except (OSError, tomllib.TOMLDecodeError) as error:
+        raw = load_project_config(config_path)
+    except ValueError as error:
         raise ValueError(f"Не удалось прочитать конфигурацию {config_path}: {error}") from error
     try:
+        # Центральный конфиг содержит follow.*, старый отдельный TOML остаётся
+        # совместимым до завершения миграции.
+        raw = raw.get("follow", raw)
         camera = raw["camera"]
         guidance = raw["guidance"]
         msp = raw["msp"]
@@ -107,6 +142,7 @@ def load_follow_config(path: str | Path) -> FollowConfig:
             MspConfig(
                 bool(msp["enabled"]),
                 str(msp["transport"]),
+                bool(msp.get("allow_real_control", False)),
                 str(msp["serial_port"]),
                 int(msp["baudrate"]),
             ),
@@ -119,6 +155,22 @@ def load_follow_config(path: str | Path) -> FollowConfig:
                 float(verification.get("foreground_margin_percent", 15.0)),
             ),
             TrackerConfig(str(raw.get("tracker", {}).get("algorithm", "csrt"))),
+            CaptureSnapshotConfig(
+                bool(raw.get("capture_snapshot", {}).get("enabled", True)),
+                str(raw.get("capture_snapshot", {}).get("directory", "diagnostics/targets")),
+            ),
+            TargetControlConfig(
+                bool(raw.get("control", {}).get("enabled", False)),
+                str(raw.get("control", {}).get("target_state_file", "/tmp/dront16_target.json")),
+                int(raw.get("control", {}).get("target_max_age_ms", 300)),
+            ),
+            RangeConfig(
+                float(raw.get("range", {}).get("horizontal_deadband_percent", 5.0)),
+                float(raw.get("range", {}).get("size_change_deadband_percent", 1.0)),
+                float(raw.get("range", {}).get("smoothing_alpha", 0.25)),
+                float(raw.get("range", {}).get("control_threshold_percent", 50.0)),
+                int(raw.get("range", {}).get("report_period_ms", 250)),
+            ),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(f"Ошибка параметров конфигурации {config_path}: {error}") from error
@@ -126,8 +178,12 @@ def load_follow_config(path: str | Path) -> FollowConfig:
         raise ValueError("Угол обзора камеры должен быть от 0 до 180 градусов")
     if result.guidance.report_period_ms <= 0:
         raise ValueError("report_period_ms должен быть положительным")
-    if result.msp.transport != "dry-run" or result.msp.enabled:
-        raise ValueError("До отдельного разрешения MSP должен оставаться в режиме dry-run")
+    if result.msp.transport not in {"dry-run", "real"}:
+        raise ValueError("follow.msp.transport должен быть dry-run или real")
+    if (result.msp.transport == "real" or result.msp.enabled) and not result.msp.allow_real_control:
+        raise ValueError(
+            "Для real MSP требуется явное разрешение follow.msp.allow_real_control = true"
+        )
     if not 0 < result.verification.min_similarity <= 1:
         raise ValueError("min_similarity должен быть больше 0 и не больше 1")
     if result.verification.max_bad_frames <= 0:
@@ -140,4 +196,16 @@ def load_follow_config(path: str | Path) -> FollowConfig:
         raise ValueError("foreground_margin_percent должен быть от 0 до 50")
     if result.tracker.algorithm not in {"csrt", "kcf", "mil"}:
         raise ValueError("algorithm должен быть csrt, kcf или mil")
+    if not result.capture_snapshot.directory.strip():
+        raise ValueError("capture_snapshot.directory не должен быть пустым")
+    if result.control.max_age_ms <= 0:
+        raise ValueError("target_max_age_ms должен быть положительным")
+    if result.range.horizontal_deadband_percent < 0 or result.range.size_change_deadband_percent < 0:
+        raise ValueError("Пороги range не могут быть отрицательными")
+    if not 0 < result.range.smoothing_alpha <= 1:
+        raise ValueError("smoothing_alpha должен быть больше 0 и не больше 1")
+    if not 0 < result.range.control_threshold_percent <= 100:
+        raise ValueError("control_threshold_percent должен быть от 0 до 100")
+    if result.range.report_period_ms <= 0:
+        raise ValueError("range.report_period_ms должен быть положительным")
     return result

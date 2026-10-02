@@ -1,0 +1,53 @@
+{
+    // Настройки редактора только для TOML-файлов DronT16.
+    "[toml]": {
+        "editor.semanticHighlighting.enabled": true,
+        "editor.bracketPairColorization.enabled": true,
+        "editor.guides.bracketPairs": true,
+        "editor.renderWhitespace": "boundary"
+    },
+    // Правила ограничены scope с суффиксом .toml и не меняют другие языки.
+    "editor.tokenColorCustomizations": {
+        "textMateRules": [
+            {
+                "scope": "comment.line.number-sign.toml",
+                "settings": {
+                    "foreground": "#6A9955",
+                    "fontStyle": "italic"
+                }
+            },
+            {
+                "scope": "entity.name.section.toml, entity.name.tag.toml",
+                "settings": {
+                    "foreground": "#4EC9B0",
+                    "fontStyle": "bold"
+                }
+            },
+            {
+                "scope": "support.type.property-name.toml, variable.other.key.toml, variable.other.toml",
+                "settings": {
+                    "foreground": "#9CDCFE"
+                }
+            },
+            {
+                "scope": "string.quoted.double.toml, string.quoted.single.toml",
+                "settings": {
+                    "foreground": "#CE9178"
+                }
+            },
+            {
+                "scope": "constant.numeric.toml, constant.language.boolean.toml",
+                "settings": {
+                    "foreground": "#B5CEA8"
+                }
+            },
+            {
+                "scope": "invalid.illegal.toml",
+                "settings": {
+                    "foreground": "#F44747",
+                    "fontStyle": "underline"
+                }
+            }
+        ]
+    }
+}

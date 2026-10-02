@@ -1,0 +1,529 @@
+# Единая рабочая конфигурация DronT16.
+# Все модули читают только свою секцию через src/configuration.py.
+# Секреты, IP Raspberry и SSH-пути находятся отдельно в deployment.toml.
+
+[video]
+# Режим вывода: auto выбирает J7 на Raspberry и web на ноутбуке.
+display = "auto"
+# Адрес и порт диагностического веб-просмотра.
+web_host = "127.0.0.1"
+web_port = 8080
+# Полноэкранный вывод HDMI на ноутбуке.
+hdmi_fullscreen = true
+# DRM-устройство композитного J7 Raspberry Pi.
+j7_device = "/dev/dri/by-path/platform-1f00144000.vec-card"
+# Файл программной команды для тестового SSH-пульта.
+control_file = "/tmp/dront16_command"
+
+# Параметры цифровой камеры. Их редактирует ручной веб-интерфейс ./camera.sh.
+[camera]
+# Источник: auto выбирает CSI/Picamera2 на Raspberry и OpenCV на ноутбуке.
+# Значение csi принудительно включает Picamera2, путь или индекс включает OpenCV.
+source = "auto"
+# Рабочая ширина кадра; режим OV5647 с повышенной детализацией.
+width = 1296
+# Рабочая высота кадра для режима OV5647 1296x972.
+height = 972
+# Частота CSI-камеры; фактический режим сенсора даёт около 46.3 кадра/с.
+fps = 46.3
+# RGB888 Picamera2 в массиве NumPy расположен как B,G,R и совместим с OpenCV.
+pixel_format = "RGB888"
+# Номер CSI-камеры Picamera2; для единственной камеры используется 0.
+index = 0
+# Число буферов Picamera2; меньше 2 недопустимо для видеоконфигурации.
+buffer_count = 4
+
+[camera.web]
+# Адрес ручного веб-интерфейса настройки камеры. 0.0.0.0 открывает его только
+# в доступной локальной сети Raspberry; сервис не входит в автозагрузку.
+host = "0.0.0.0"
+# Отдельный непривилегированный порт: не требует sudo и не занят видеопросмотром.
+port = 8090
+
+# Цифровое приближение выключено: уровень 1.0 сохраняет весь кадр.
+[camera.zoom]
+# Включать crop и увеличение центральной области кадра.
+enabled = false
+# Коэффициент цифрового приближения; 2.0 оставляет половину ширины и высоты.
+level = 1.0
+# Горизонтальный центр zoom в долях ширины кадра.
+center_x = 0.5
+# Вертикальный центр zoom в долях высоты кадра.
+center_y = 0.5
+
+[camera.lens]
+# Коррекция дисторсии объектива после калибровки шахматной таблицей.
+undistort = false
+# NPZ-файл с camera_matrix и dist_coeffs, не создаётся автоматически.
+calibration_file = "config/ov5647_calibration.npz"
+
+[camera.image]
+# Отражение изображения по горизонтали.
+flip_horizontal = false
+# Отражение изображения по вертикали.
+flip_vertical = false
+# Поворот кадра по часовой стрелке: только 0, 90, 180 или 270 градусов.
+rotate_deg = 0
+# Контраст: 1.0 без изменения.
+contrast = 1.0
+# Добавка яркости в единицах OpenCV: 0 без изменения.
+brightness = 0.0
+# Резкость: 0 отключена, положительное значение включает unsharp mask.
+sharpness = 0.0
+
+[osd]
+# Размеры и положение графики OSD.
+capture_box_size = 53
+crosshair_arm = 8
+line_thickness = 2
+target_point_radius = 4
+mode_font_scale = 0.8
+mode_font_thickness = 2
+message_font_scale = 0.55
+message_font_thickness = 2
+mode_x = 20
+mode_y = 32
+center_x_percent = 50.0
+center_y_percent = 50.0
+center_offset_x = -10
+center_offset_y = -10
+# Квадрат смещён влево и вверх: яркая поперечная рамка не должна становиться
+# главным признаком модели CSRT при захвате цели.
+capture_box_offset_x = -5
+capture_box_offset_y = -10
+
+[osd.colors]
+# Только три рабочих цвета OSD в формате #RRGGBB.
+# Белый DIRECT — пилот, жёлтый CAPTURE — захват, красный FOLLOW — Raspberry.
+idle = "#ffffff"
+capture = "#ffdd00"
+tracking = "#ff0000"
+
+[osd.output]
+# Геометрия видеовыхода J7.
+video_standard = "NTSC"
+fit = "stretch"
+scale_x = 1.0
+scale_y = 1.0
+offset_x = 0
+offset_y = 0
+
+[osd.betaflight]
+# Штатное OSD Betaflight по MSP DisplayPort. Пока выключено: включается только
+# после проверки отдельного UART6 FC и резервного сохранения настроек полётника.
+enabled = true
+# Выделенный UART4 Raspberry: pin 32 TXD4 / pin 33 RXD4.
+# Он не делит очередь с UART1 Raspberry, который читает MSP-датчики FC.
+serial_port = "/dev/ttyAMA4"
+# Скорость VTX (MSP + DisplayPort) на UART6 Betaflight.
+baudrate = 115200
+# Период технической строки UART6 в journalctl; не влияет на видеопоток.
+diagnostic_report_ms = 2000
+# Общий снимок сетки, который мост MSP отдаёт процессу видеовывода.
+state_file = "/tmp/dront16_betaflight_osd.json"
+# Аналоговый Betaflight OSD использует сетку 30 столбцов x 13 строк.
+columns = 30
+rows = 13
+# Цвет слоя штатного OSD на выходе J7, формат #RRGGBB.
+color = "#ffffff"
+# Непрозрачное штатное OSD; уменьшение допускается для отладки.
+opacity = 1.0
+
+[follow.camera]
+# Углы обзора и опорный центр камеры.
+# Текущие углы оставлены от прототипа; после установки объектива OV5647 их
+# обязательно измерить по реальному кадру до включения управляющих команд.
+horizontal_fov_deg = 90.0
+vertical_fov_deg = 60.0
+center_x_percent = 50.0
+center_y_percent = 50.0
+
+[follow.guidance]
+# Ограничения расчёта направления к выбранной цели.
+yaw_deadband_deg = 2.0
+pitch_deadband_deg = 2.0
+max_yaw_rate_deg_s = 30.0
+max_pitch_rate_deg_s = 15.0
+report_period_ms = 250
+
+[follow.msp]
+# Реальный транспорт MSP явно разрешён для стендового теста без винтов.
+enabled = true
+transport = "real"
+# Дополнительный предохранитель: без true запуск real MSP запрещён кодом.
+allow_real_control = true
+serial_port = "/dev/ttyAMA0"
+baudrate = 115200
+
+[follow.tracker]
+# Алгоритм удержания уже захваченной цели.
+algorithm = "csrt"
+
+[follow.capture_snapshot]
+# Один PNG создаётся строго в момент подтверждённого захвата пилотом.
+enabled = true
+# Фрагмент внутри рамки — исходная визуальная модель цели для последующего разбора.
+# diagnostics исключён из Git: это не поток видео и не запись полёта.
+directory = "diagnostics/targets"
+
+[follow.verification]
+# Проверка, что отслеживается исходный объект, а не похожий фон.
+#method = "adaptive" — CSRT ищет цель, а проверка сравнивает новую область с сохранённой моделью и понемногу обновляет её.
+#min_similarity = 0.3 — минимальная похожесть. Выше значение — строже, цель быстрее теряется; ниже — легче ошибочно уйти на фон.
+#max_bad_frames = 16 — цель считается потерянной только после 16 подряд плохих кадров.
+#adaptation_rate = 0.05 — рабочая модель обновляется на 5% после совпадения;
+#исходная модель захвата пилота не меняется весь цикл сопровождения.
+#foreground_margin_percent сейчас при adaptive не используется; он нужен для метода foreground.
+enabled = true
+method = "adaptive"
+min_similarity = 0.2
+max_bad_frames = 20
+adaptation_rate = 0.05
+foreground_margin_percent = 15.0
+
+[follow.control]
+# Публикация координат цели для внешнего контура включена.
+enabled = true
+# Файл связи видеотрекера и CRSF-моста; создаётся атомарно и не содержит секретов.
+target_state_file = "/tmp/dront16_target.json"
+# Максимальный возраст координат цели для управления yaw.
+target_max_age_ms = 300
+
+[visual_servoing]
+# Внешний контур рассчитывается вместе с рабочим мостом.
+enabled = true
+# Стендовый real: Raspberry заменяет только CH1–CH4 в CRSF-кадре при FOLLOW.
+# Включать только при снятых винтах; DISARM, watchdog и возврат к пилоту остаются
+# обязательными защитами моста.
+output_mode = "real"
+# Период внешнего расчёта 50 мс соответствует частоте 20 Гц.
+control_period_ms = 50
+# Каналы Betaflight: CH1 roll, CH2 pitch, CH3 throttle, CH4 yaw.
+roll_channel = 1
+pitch_channel = 2
+throttle_channel = 3
+yaw_channel = 4
+# Рабочий центр и пределы 11-битных значений CRSF.
+rc_center = 992
+rc_min = 191
+rc_max = 1792
+# Минимальная площадь цели, ниже которой измерение масштаба недостоверно.
+min_scale_percent = 0.05
+# Сглаживание производной: меньшее значение сильнее подавляет шум.
+derivative_alpha = 0.25
+# Допуски горизонтального положения по данным FC.
+level_roll_tolerance_deg = 6.0
+level_pitch_tolerance_deg = 6.0
+# При большем наклоне контур отключается в FAULT и возвращает управление пилоту.
+max_abs_tilt_deg = 45.0
+# Число последовательных просроченных MSP-измерений до перехода в FAULT.
+# Один краткий пропуск переносится с повтором последней безопасной команды.
+sensor_fault_confirmations = 3
+# Преобразование ошибки угла корпуса в ограниченную команду RC.
+attitude_kp = 18.0
+attitude_max_correction = 250
+# Знаки коррекции roll/pitch зависят от реверсов и проверяются на стенде.
+roll_direction = 1.0
+pitch_rc_direction = 1.0
+# Время и допуски подтверждения удержания высоты перед движением по pitch.
+altitude_hold_s = 0.8
+altitude_tolerance_m = 0.20
+vario_tolerance_m_s = 0.30
+# Перед фактическим перехватом RPI собирает спокойные показания в этом окне.
+# Это не позволяет принять высоту или газ пилота во время набора/снижения за
+# исходную точку автоматического сопровождения.
+altitude_reference_window_s = 0.70
+altitude_reference_max_vario_m_s = 0.20
+altitude_reference_max_tilt_deg = 6.0
+# В FOLLOW выход за эти пределы не отменяет сопровождение, а начинает плавно
+# уменьшать крен и движение вперёд. Высота по CH3 остаётся главным контуром.
+altitude_guard_error_m = 0.20
+altitude_guard_vario_m_s = 0.30
+# При этих жёстких пределах боковой крен и pitch временно равны нулю. Это не
+# фиксированная команда полёта, а граница доверия к вертикальному состоянию.
+altitude_authority_hard_error_m = 0.60
+altitude_authority_hard_vario_m_s = 0.90
+# Даже при приоритете высоты остаётся малая коррекция курса к цели: нос не
+# теряет направление, пока боковое движение временно ослаблено.
+altitude_heading_min_authority = 0.25
+# PI-регулятор высоты и демпфирование вертикальной скорости.
+altitude_kp = 80.0
+altitude_ki = 12.0
+altitude_vario_gain = 35.0
+# Ограничение накопления интегратора высоты в метрах-секундах.
+altitude_integral_limit = 2.0
+# Интегратор включается только после спокойного удержания: он устраняет
+# постоянную ошибку, но не должен разгонять дрон на переходных процессах.
+altitude_integral_activation_s = 1.0
+# Максимальная поправка газа относительно изученного газа висения.
+throttle_max_correction = 120
+# Максимальная скорость изменения CH3. При 20 Гц 200 ед/с дают максимум
+# 10 единиц CRSF за один шаг и убирают резкие ступени тяги.
+throttle_slew_per_s = 200.0
+# Мёртвая зона логарифмической ошибки масштаба объекта.
+pitch_deadband = 0.05
+# PD-регулятор переводит ошибку масштаба в требуемый угол pitch.
+pitch_kp = 6.0
+pitch_kd = 0.2
+# Максимальный требуемый угол pitch при сопровождении.
+pitch_max_angle_deg = 8.0
+# Знак движения по масштабу; меняется только после стендовой проверки.
+pitch_direction = 1.0
+# Сохранять спокойный фактический pitch пилота в момент включения FOLLOW.
+# Это опора темпа движения вперёд, а не измеренная скорость в м/с.
+forward_pitch_reference_enabled = true
+# Больше этого угла опору пилота не запоминаем, чтобы не зафиксировать резкий манёвр.
+forward_pitch_reference_max_deg = 6.0
+# Ограничение скорости изменения ACRO-команды CH2, единиц CRSF в секунду.
+pitch_rate_slew_per_s = 240.0
+# Включить боковой контур CH1 в состоянии FOLLOW.
+roll_follow_enabled = true
+# Мёртвая зона горизонтальной ошибки цели для бокового крена.
+roll_follow_deadband = 0.04
+# PD-коэффициенты: ошибка изображения -> требуемый угол roll.
+# Усиленная боковая реакция: ошибка изображения заметнее переводится в
+# требуемый угол крена. Максимум всё равно ограничен ниже по конфигурации.
+roll_follow_kp = 12.0
+roll_follow_kd = 0.4
+# Ограничение требуемого бокового крена: ±9° вместо прежних ±8°.
+roll_follow_max_angle_deg = 9.0
+# Знак «объект справа -> крен вправо»; проверяется на стенде.
+roll_follow_direction = 1.0
+# Прогноз по скорости изображения: помогает начать торможение боковой скорости
+# до пересечения объектом центра кадра.
+roll_brake_lookahead_s = 0.25
+# Очень маленькие изменения X считаются шумом и не создают обратный крен.
+roll_brake_derivative_deadband = 0.03
+# Пилот всегда летит в ACRO: CH1 задаёт не угол, а угловую скорость roll.
+# Это внешний коэффициент: ошибка целевого и измеренного угла -> RC-rate.
+# Увеличен для заметного крена в ACRO без увеличения скорости нарастания.
+roll_angle_to_rate_kp = 24.0
+# Максимальное отклонение CH1 от центра для ACRO-коррекции roll.
+# Защитный предел команды крена от центра.
+roll_rate_max_correction = 80
+# Самая большая скорость изменения отклонения CH1, единиц CRSF в секунду.
+# При 20 Гц это максимум 24 единицы за один расчётный шаг.
+roll_rate_slew_per_s = 480.0
+# Yaw и крен работают одновременно по одной горизонтальной ошибке цели.
+# Крен задаёт боковое движение, yaw прямо наводит нос к линии визирования,
+# а pitch продолжает движение вперёд. Получается плавная дуга, а не разворот
+# на месте. Приоритет высоты уменьшает обе боковые команды одновременно.
+coordinated_yaw_enabled = true
+# Коэффициент прямой ошибки изображения -> поправка yaw в единицах CRSF.
+# Небольшое усиление сохраняет плавную дугу вместе с креном.
+coordinated_yaw_kp = 170.0
+# Абсолютное ограничение команды yaw от центра.
+# Защитный предел yaw, чтобы усиление не превратилось в резкий разворот.
+coordinated_yaw_max_correction = 80
+# Знак yaw: должен совпадать с направлением крена на стендовом тесте.
+coordinated_yaw_direction = 1.0
+# Ограниченная поправка yaw по скорости ухода цели: плавно гасит разворот,
+# когда объект уже возвращается к центру кадра.
+coordinated_yaw_brake_kd = 16.0
+# Новый кадр камеры не меняет yaw мгновенно: это доля нового измерения в
+# сглаженной ошибке. Меньшее значение сильнее подавляет дрожание изображения.
+yaw_error_alpha = 0.30
+# Максимальная скорость изменения CH4, единиц CRSF в секунду. При 20 Гц
+# 240 ед/с дают максимум 12 единиц за один шаг и исключают резкий поворот.
+yaw_slew_per_s = 240.0
+# Компенсировать потерю вертикальной тяги при боковом крене.
+roll_thrust_compensation_enabled = true
+# Медленное обучение газа висения в устойчивом ручном полёте.
+hover_learning_alpha = 0.02
+# Максимальные вертикальная скорость и наклон для обучения газа висения.
+hover_learning_max_vario_m_s = 0.20
+hover_learning_max_tilt_deg = 8.0
+# Газ вне этого диапазона не считается режимом висения.
+hover_learning_min_throttle = 600
+hover_learning_max_throttle = 1500
+# При FOLLOW немедленно передавать CH1–CH4 Raspberry после свежего MSP-снимка.
+# Начальный газ берётся из обучения или текущего CH3 пилота, без фиксированного значения.
+immediate_follow_takeover = true
+
+[follow.range]
+# Горизонтальный допуск относительно центра кадра, в процентах ширины полукадра.
+horizontal_deadband_percent = 5.0
+# Минимальное относительное изменение размера рамки для вывода приближения/удаления.
+size_change_deadband_percent = 1.0
+# Сглаживание размера рамки: 1.0 — без сглаживания.
+smoothing_alpha = 0.25
+# Порог площади рамки: при достижении выводится «ОБЪЕКТ ПОД КОНТРОЛЕМ!».
+# Это отдельный статус; показатель «ДО ОБЪЕКТА» считается от размера захвата.
+control_threshold_percent = 50.0
+# Период вывода тестовых строк в консоль.
+report_period_ms = 250
+
+[receiver]
+# Рабочий CRSF-вход от приёмника на Raspberry pin 10 / GPIO15.
+serial_port = "/dev/ttyAMA0"
+baudrate = 420000
+link_timeout_ms = 300
+mode_channel = 6
+report_period_ms = 250
+# Общий флаг ARM для терминального диагностического вывода видеомодуля.
+arm_state_file = "/tmp/dront16_arm_state"
+
+[receiver.mode]
+# Пороги режимов AUX-канала видеосистемы.
+low_max = 700
+high_min = 1700
+debounce_frames = 3
+
+[bridge]
+# Параметры моста CRSF между приёмником и полётником.
+forward_frame_type = 22
+forward_link_statistics = true
+report_period_ms = 500
+verbose_frames = false
+sensor_terminal = false
+# Записывать каждый корректный ответ MSP в файл во время ARM-сессии.
+sensor_log_every_packet = true
+# Если полный режим отключён, сохранять объединённый снимок с этим периодом.
+sensor_log_period_ms = 100
+control_file = "/tmp/dront16_command"
+simulator_control_file = "/tmp/simulator_filesafe_command"
+# Базовое имя; каждый ARM-цикл получает отдельный файл с датой и временем.
+log_file = "simulator_filesafe.log"
+pilot_log_period_ms = 500
+command_log_period_ms = 100
+# Интервал реального приёма CRSF между кадрами, после которого журнал сообщает
+# о разрыве радиоканала. Он измеряется быстрым трактом, не задержкой камеры.
+rc_gap_log_ms = 100
+# Быстрый CRSF-тракт работает отдельно от MSP, камеры и журнала.
+# Если расчёт сопровождения не обновил команду за это время, pin 8 снова
+# передаёт живые CH1–CH4 пилота вместо старой команды Raspberry.
+realtime_override_max_age_ms = 250
+# Очередь копий кадров для медленного диагностического контура. Переполнение
+# не задерживает UART: старые кадры для расчёта отбрасываются, но не для FC.
+realtime_control_queue_frames = 128
+
+[msp]
+# MSP-датчики FC через Raspberry UART1: pin 27/28.
+enabled = true
+serial_port = "/dev/ttyAMA1"
+baudrate = 115200
+request_period_ms = 50
+sensor_max_age_ms = 250
+# Запрашивать GPS через тот же read-only MSP-канал после настройки GPS в FC.
+gps_enabled = true
+
+[sensors]
+# Единый контракт датчиков для диагностического запуска и будущего автомата.
+barometer = "FC/MSP_ALTITUDE"
+imu = "FC/MSP_ATTITUDE+MSP_RAW_IMU"
+magnetometer = "FC/MSP_RAW_IMU"
+compass = "FC/MSP_RAW_IMU_XY_DIAGNOSTIC"
+gps = "FC/MSP_RAW_GPS"
+front_camera = "RPI/front_camera"
+
+[sensor_test]
+# Локальный тест привязки не открывает UART, камеру и не отправляет команды FC.
+enabled = true
+# Файл локального журнала теста; весь каталог diagnostics исключён из Git.
+log_file = "diagnostics/raspberry/sensor_binding_test.log"
+# Число синтетических циклов, достаточное для проверки объединения ответов MSP.
+cycles = 3
+# Период между синтетическими наборами показаний.
+period_ms = 100
+# Показывать в терминале только итоговые состояния, подробности остаются в логе.
+verbose = false
+
+[failsafe]
+# На этапе отладки слежения режим потери RC выполняет только Betaflight.
+# Raspberry не удерживает высоту, не разворачивает дрон и не меняет RC-команды.
+enabled = false
+# Рабочий режим: takeover начинается при реальном тайм-ауте CRSF-кадров.
+# Для стендовой имитации тумблером временно используется значение "CH7".
+mode = "real"
+roll_channel = 1
+pitch_channel = 2
+throttle_channel = 3
+yaw_channel = 4
+rc_center = 992
+rc_min = 191
+rc_max = 1792
+target_roll_deg = 0.0
+target_pitch_deg = 0.0
+correction_per_degree = 18.0
+max_correction = 250
+fault_action = "HOLD"
+disarm_channel = 5
+disarm_value = 191
+stabilization_channel = 0
+stabilization_value = 1500
+level_roll_tolerance_deg = 5.0
+level_pitch_tolerance_deg = 5.0
+level_hold_s = 1.0
+level_throttle = 992
+altitude_hold_gain = 80.0
+altitude_hold_integral_gain = 12.0
+altitude_hold_vario_gain = 35.0
+max_altitude_correction = 120
+max_altitude_integral_correction = 80
+turn_enabled = true
+turn_degrees = 180.0
+turn_yaw_command = 1155
+takeover_throttle_step_per_s = 50.0
+climb_guard_altitude_error_m = 0.20
+climb_guard_vario_m_s = 0.50
+climb_guard_max_throttle = 850
+
+[simulation]
+# Старый автономный симулятор запускается только отдельным явным тестом.
+duration_s = 0.0
+step_ms = 100
+packet_period_ms = 500
+log_file = "simulator_filesafe.log"
+
+[simulation.flight_controller]
+name = "Betaflight HAKRCF405V2"
+crsf_port = "/simulated/ttyAMA0"
+msp_port = "/simulated/uart1"
+baudrate = 420000
+heading_deg = 184.6
+altitude_m = 38.2
+speed_m_s = 12.7
+
+[simulation.object]
+object_id = "TARGET_001"
+x = 412.0
+y = 238.0
+width = 86.0
+height = 74.0
+confidence = 0.87
+
+[simulation.failsafe]
+turn_degrees = 180.0
+turn_rate_deg_s = 60.0
+use_last_packet = true
+
+[simulation.control]
+loss_channel = 7
+link_ok_max = 700
+link_lost_min = 1700
+disarm_channel = 5
+disarm_active_max = 700
+arm_active_min = 1700
+throttle_channel = 3
+throttle_zero = 191
+throttle_ramp_s = 5.0
+command_file = "/tmp/simulator_filesafe_command"
+
+[logging]
+# Файловый журнал начинается с ARM и завершается после DISARM.
+file = "simulator_filesafe.log"
+# Включает или отключает независимый канал терминала.
+console_enabled = true
+# Включает или отключает независимый файловый канал.
+file_enabled = true
+# В диагностическом тесте мост не печатает служебные категории в терминал.
+console_categories = []
+# Полный набор категорий для последующего разбора.
+# Для разбора сопровождения сохраняются датчики, команды пилота и решения RPI.
+file_categories = ["FC", "PILOT", "RPI"]
+# Старый флаг оставлен для подробного вывода датчиков в консоль при ручном включении.
+sensor_terminal = false
+
+[runtime]
+# Запуск CRSF/MSP-моста вместе с видео на Raspberry Pi.
+start_receiver_bridge = true

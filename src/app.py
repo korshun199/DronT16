@@ -5,15 +5,21 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from pathlib import Path
 
 import cv2
 
+from src.configuration import load_config_section
 from src.control.follow_config import load_follow_config
 from src.control.guidance import calculate_guidance
+from src.control.target_control import write_target_guidance
+from src.control.target_range import RangeEstimatorConfig, TargetRangeEstimator
 from src.core.state_machine import Command, Mode, TargetBox, TargetStateMachine
 from src.interface.overlay import draw_overlay
 from src.interface.osd_config import load_osd_config
+from src.interface.betaflight_osd import draw_betaflight_osd, load_betaflight_osd_config
 from src.interface.web import FrameHub, start_web_preview
+from src.target.snapshot import save_capture_snapshot
 from src.target.tracker import TargetTracker
 from src.target.verifier import TargetVerifier
 from src.video.capture import VideoSource
@@ -22,35 +28,41 @@ from src.video.capture import VideoSource
 def parse_args() -> argparse.Namespace:
     """Читает параметры источника видео из командной строки."""
     parser = argparse.ArgumentParser(description="Визуальный прототип DronT16")
-    parser.add_argument("--source", default="0", help="индекс камеры или путь к видеофайлу")
-    parser.add_argument("--display", choices=("hdmi", "web", "j7", "both"), default="hdmi",
+    parser.add_argument("--source", default=None, help="устаревшее переопределение источника видео")
+    parser.add_argument("--display", choices=("hdmi", "web", "j7", "both"), default=None,
                         help="вывод: веб-морда, HDMI, J7 или оба тестовых экрана")
-    parser.add_argument("--web-host", default="127.0.0.1", help="адрес веб-просмотра")
-    parser.add_argument("--web-port", type=int, default=8080, help="порт веб-просмотра")
+    parser.add_argument("--web-host", default=None, help="устаревшее переопределение адреса веб-просмотра")
+    parser.add_argument("--web-port", type=int, default=None, help="устаревшее переопределение порта веб-просмотра")
     parser.add_argument("--hdmi-x", type=int, default=0, help="X внешнего HDMI-экрана")
     parser.add_argument("--hdmi-y", type=int, default=0, help="Y внешнего HDMI-экрана")
-    parser.add_argument("--fullscreen", action="store_true", help="полноэкранный вывод HDMI")
+    parser.add_argument("--fullscreen", action="store_true", default=None, help="полноэкранный вывод HDMI")
     parser.add_argument("--capture-size", type=int, default=160, help="размер центральной области захвата")
-    parser.add_argument("--osd-config", default="config/osd.toml",
-                        help="конфигурация размеров и оформления OSD")
-    parser.add_argument("--follow-config", default="config/follow.toml",
-                        help="конфигурация модуля сопровождения")
-    parser.add_argument("--j7-device", default="/dev/dri/by-path/platform-1f00144000.vec-card",
-                        help="DRM-устройство композитного J7")
-    parser.add_argument("--control-file", default="/tmp/dront16_command",
-                        help="файл команд временного SSH-пульта")
+    parser.add_argument("--config", default="config/dront16.toml",
+                        help="единая конфигурация DronT16")
+    parser.add_argument("--osd-config", default=None,
+                        help="устаревший отдельный путь OSD; по умолчанию используется --config")
+    parser.add_argument("--follow-config", default=None,
+                        help="устаревший отдельный путь follow; по умолчанию используется --config")
+    parser.add_argument("--j7-device", default=None, help="устаревшее переопределение DRM-устройства J7")
+    parser.add_argument("--control-file", default=None, help="устаревшее переопределение файла команд")
     return parser.parse_args()
 
 
-def center_target(frame: object, box_size: int) -> TargetBox | None:
-    """Создаёт область захвата по центру кадра без ручного рисования мышью."""
+def center_target(frame: object, osd_config: object) -> TargetBox | None:
+    """Создаёт область захвата точно в видимой пилоту рамке OSD."""
     height, width = frame.shape[:2]
-    actual_size = min(box_size, width, height)
+    actual_size = min(osd_config.capture_box_size, width, height)
     if actual_size <= 0:
         return None
+    # Формула совпадает с draw_overlay(): сохранённая модель и рамка на J7
+    # должны описывать один и тот же участок исходного изображения.
+    center_x = round(width * osd_config.center_x_percent / 100) + osd_config.center_offset_x
+    center_y = round(height * osd_config.center_y_percent / 100) + osd_config.center_offset_y
+    box_center_x = center_x + osd_config.capture_box_offset_x
+    box_center_y = center_y + osd_config.capture_box_offset_y
     return TargetBox(
-        float(width // 2 - actual_size // 2),
-        float(height // 2 - actual_size // 2),
+        float(box_center_x - actual_size // 2),
+        float(box_center_y - actual_size // 2),
         float(actual_size),
         float(actual_size),
     )
@@ -79,12 +91,53 @@ def main() -> int:
     """Запускает цикл видео, обработки команд и экранного сопровождения."""
     args = parse_args()
     try:
-        follow_config = load_follow_config(args.follow_config)
-        osd_config = load_osd_config(args.osd_config)
+        video_config = load_config_section(args.config, "video")
+        camera_config = load_config_section(args.config, "camera")
+        follow_config = load_follow_config(args.follow_config or args.config)
+        osd_config = load_osd_config(args.osd_config or args.config)
+        betaflight_osd_config = load_betaflight_osd_config(
+            load_config_section(args.osd_config or args.config, "osd")
+        )
     except ValueError as error:
         print(f"[DronT16] Ошибка конфигурации сопровождения: {error}", file=sys.stderr)
         return 2
-    source = VideoSource(args.source)
+    source_name = str(args.source or camera_config["source"])
+    display_name = str(args.display or video_config["display"])
+    web_host = str(args.web_host or video_config["web_host"])
+    web_port = int(args.web_port or video_config["web_port"])
+    j7_device = str(args.j7_device or video_config["j7_device"])
+    control_file = str(args.control_file or video_config["control_file"])
+    target_state_file = follow_config.control.state_file
+    fullscreen = bool(video_config["hdmi_fullscreen"] if args.fullscreen is None else args.fullscreen)
+    if display_name == "auto":
+        display_name = "j7" if sys.platform.startswith("linux") and Path("/proc/device-tree/model").exists() else "web"
+    if display_name not in {"hdmi", "web", "j7", "both"}:
+        raise ValueError("video.display должен быть auto, hdmi, web, j7 или both")
+    try:
+        source = VideoSource(
+            source_name,
+            int(camera_config["width"]),
+            int(camera_config["height"]),
+            float(camera_config["fps"]),
+            str(camera_config["pixel_format"]),
+            int(camera_config["index"]),
+            int(camera_config["buffer_count"]),
+            bool(camera_config["zoom"]["enabled"]),
+            float(camera_config["zoom"]["level"]),
+            float(camera_config["zoom"]["center_x"]),
+            float(camera_config["zoom"]["center_y"]),
+            bool(camera_config["lens"]["undistort"]),
+            str(camera_config["lens"]["calibration_file"]),
+            bool(camera_config["image"]["flip_horizontal"]),
+            bool(camera_config["image"]["flip_vertical"]),
+            int(camera_config["image"]["rotate_deg"]),
+            float(camera_config["image"]["contrast"]),
+            float(camera_config["image"]["brightness"]),
+            float(camera_config["image"]["sharpness"]),
+        )
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
+        print(f"[DronT16] Ошибка видеовхода: {error}", file=sys.stderr, flush=True)
+        return 2
     machine = TargetStateMachine()
     verifier = TargetVerifier(
         follow_config.verification.min_similarity,
@@ -94,41 +147,47 @@ def main() -> int:
         follow_config.verification.foreground_margin_percent,
     ) if follow_config.verification.enabled and follow_config.verification.method != "disabled" else None
     tracker = TargetTracker(verifier, follow_config.tracker.algorithm)
+    range_estimator = TargetRangeEstimator(
+        RangeEstimatorConfig(
+            follow_config.range.horizontal_deadband_percent,
+            follow_config.range.size_change_deadband_percent,
+            follow_config.range.smoothing_alpha,
+            follow_config.range.control_threshold_percent,
+        )
+    )
     hub = FrameHub()
     display_mode = Mode.IDLE
-    if args.display in ("web", "both"):
-        start_web_preview(hub, args.web_host, args.web_port)
+    if display_name in ("web", "both"):
+        start_web_preview(hub, web_host, web_port)
     j7_output = None
-    if args.display == "j7":
+    if display_name == "j7":
         from src.interface.j7_output import J7Output
         j7_output = J7Output(
-            args.j7_device, osd_config.output_fit, osd_config.output_scale_x,
+            j7_device, osd_config.output_fit, osd_config.output_scale_x,
             osd_config.output_scale_y, osd_config.output_offset_x,
-            osd_config.output_offset_y,
+            osd_config.output_offset_y, osd_config.video_standard,
         )
-    if args.display in ("hdmi", "both"):
-        cv2.namedWindow("DronT16", cv2.WINDOW_NORMAL)
-        cv2.moveWindow("DronT16", args.hdmi_x, args.hdmi_y)
-        if args.fullscreen:
-            cv2.setWindowProperty("DronT16", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-    message = "1: DIRECT | 2: CAPTURE | 3: FOLLOW | Q: EXIT"
-    last_report = 0.0
-
-    def report_guidance(frame: object, target: TargetBox, color: str, force: bool = False) -> None:
-        """Печатает только координаты цели заданным цветом."""
-        nonlocal last_report
-        now = time.monotonic()
-        if not force and now - last_report < follow_config.guidance.report_period_ms / 1000.0:
-            return
-        result = calculate_guidance(target, frame.shape[1], frame.shape[0], follow_config)
-        reset = "\033[0m"
         print(
-            f"{color}[TARGET] x={result.target_x:.1f}px y={result.target_y:.1f}px "
-            f"norm=({result.normalized_x:+.3f},{result.normalized_y:+.3f}) "
-            f"angle yaw={result.yaw_error_deg:+.1f}deg pitch={result.pitch_error_deg:+.1f}deg{reset}",
+            f"[DronT16] Видеотракт: камера={source.describe()} | "
+            f"J7={j7_output.mode_name} ({osd_config.video_standard})",
             flush=True,
         )
-        last_report = now
+        if source.width != j7_output.width or source.height != j7_output.height:
+            print(
+                "[DronT16] ИНФОРМАЦИЯ: размеры камеры и J7 различаются; "
+                "кадр будет приведён к геометрии аналогового выхода.",
+                file=sys.stderr, flush=True,
+            )
+    if display_name in ("hdmi", "both"):
+        cv2.namedWindow("DronT16", cv2.WINDOW_NORMAL)
+        cv2.moveWindow("DronT16", args.hdmi_x, args.hdmi_y)
+        if fullscreen:
+            cv2.setWindowProperty("DronT16", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    message = "LIVE"
+    # Причина потери хранится до нового захвата: мост успеет зафиксировать её
+    # в общем журнале, даже если сразу вернёт пилоту режим DIRECT.
+    target_loss_reason: str | None = None
+    target_loss_detail: str | None = None
 
     try:
         while True:
@@ -137,21 +196,32 @@ def main() -> int:
                 updated_target = tracker.update(frame)
                 machine.update_target(updated_target)
                 if updated_target is None:
-                    message = "TARGET LOST: SELECT AGAIN AND PRESS 1"
+                    # Потеря цели сразу возвращает белый DIRECT. Старая
+                    # отметка расстояния не существует как отдельный режим.
+                    message = "PILOT DIRECT: TARGET LOST"
+                    target_loss_reason = tracker.last_failure_reason or "TRACKER_UPDATE_FAILED"
+                    target_loss_detail = tracker.last_diagnostic_detail
             if machine.mode is Mode.LOST:
-                display_mode = Mode.LOST
-            rendered = draw_overlay(frame, display_mode, machine.target, message, osd_config)
+                # Потеря цели — это не новый автоматический режим. Рамка и
+                # цвет должны немедленно показать обычное ручное управление.
+                display_mode = Mode.IDLE
+            # Штатное OSD Betaflight рисуется первым, наша рамка — поверх него.
+            frame = draw_betaflight_osd(frame, betaflight_osd_config)
+            # На J7 оставляем рамку и линию к цели. Сопровождение всегда
+            # красное, а возврат в DIRECT — белый и не маскируется порогом.
+            overlay_message = "" if display_name == "j7" else message
+            rendered = draw_overlay(frame, display_mode, machine.target, overlay_message, osd_config)
             hub.update(rendered, display_mode, machine.target, message)
             if j7_output is not None:
                 j7_output.write(rendered)
             key = -1
-            if args.display in ("hdmi", "both"):
+            if display_name in ("hdmi", "both"):
                 cv2.imshow("DronT16", rendered)
                 key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
                 break
             web_command = hub.next_command()
-            remote_command = read_remote_command(args.control_file)
+            remote_command = read_remote_command(control_file)
             # На временном SSH-пульте ноутбука используются три положения:
             # 1 — свободный режим, 2 — захват, 3 — сопровождение.
             key_command = {ord("1"): Command.ABORT, ord("2"): Command.CAPTURE,
@@ -165,7 +235,7 @@ def main() -> int:
             command = (web_command if web_command is not None else
                        remote_command_value if remote_command_value is not None else key_command)
             if command == Command.CAPTURE or command == 2:
-                selected = center_target(frame, osd_config.capture_box_size)
+                selected = center_target(frame, osd_config)
                 result = machine.handle(Command.CAPTURE, selected)
                 if result.accepted and selected is not None:
                     try:
@@ -174,8 +244,24 @@ def main() -> int:
                         machine.handle(Command.ABORT)
                         message = "TRACKER ERROR: TARGET RESET"
                     else:
+                        target_loss_reason = None
+                        target_loss_detail = None
+                        if follow_config.capture_snapshot.enabled:
+                            try:
+                                save_capture_snapshot(
+                                    frame,
+                                    selected,
+                                    follow_config.capture_snapshot.directory,
+                                )
+                            except (OSError, ValueError) as error:
+                                print(
+                                    f"[DronT16] Не удалось сохранить модель цели: {error}",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
                         message = result.message
-                        report_guidance(frame, selected, "\033[32m", force=True)
+                        range_estimator.reset()
+                        message = "CAPTURE MODE"
                 else:
                     message = result.message
                 display_mode = machine.mode
@@ -184,15 +270,49 @@ def main() -> int:
                 message = result.message
                 display_mode = machine.mode
                 if result.accepted and machine.target is not None:
-                    report_guidance(frame, machine.target, "\033[31m", force=True)
+                    range_estimator.reset()
             elif command == Command.ABORT:
                 tracker.reset()
+                range_estimator.reset()
                 result = machine.handle(Command.ABORT)
                 message = result.message
                 display_mode = Mode.IDLE
             if machine.target is not None and machine.mode in (Mode.CAPTURE, Mode.TRACKING):
-                color = "\033[32m" if machine.mode is Mode.CAPTURE else "\033[31m"
-                report_guidance(frame, machine.target, color)
+                measured_area_percent = tracker.object_area_percent(frame, machine.target)
+                control_area_percent = tracker.frame_fill_percent(frame, machine.target)
+                measurement = range_estimator.update(
+                    machine.target, frame.shape[1], frame.shape[0], measured_area_percent,
+                    control_area_percent,
+                )
+                guidance = calculate_guidance(
+                    machine.target, frame.shape[1], frame.shape[0], follow_config
+                )
+                write_target_guidance(
+                    target_state_file,
+                    valid=True,
+                    yaw_error_deg=guidance.yaw_error_deg,
+                    pitch_error_deg=guidance.pitch_error_deg,
+                    mode=machine.mode.value,
+                    normalized_x=guidance.normalized_x,
+                    normalized_y=guidance.normalized_y,
+                    scale_percent=measurement.object_area_percent,
+                    loss_reason=None,
+                    loss_detail=tracker.last_diagnostic_detail,
+                )
+            else:
+                # После отбоя или потери цели мост не должен использовать старые координаты.
+                write_target_guidance(
+                    target_state_file,
+                    valid=False,
+                    yaw_error_deg=None,
+                    pitch_error_deg=None,
+                    mode=machine.mode.value,
+                    normalized_x=None,
+                    normalized_y=None,
+                    scale_percent=None,
+                    loss_reason=target_loss_reason,
+                    loss_detail=target_loss_detail,
+                )
     finally:
         tracker.reset()
         source.close()
