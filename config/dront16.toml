@@ -176,8 +176,8 @@ directory = "diagnostics/targets"
 #foreground_margin_percent сейчас при adaptive не используется; он нужен для метода foreground.
 enabled = true
 method = "adaptive"
-min_similarity = 0.3
-max_bad_frames = 16
+min_similarity = 0.2
+max_bad_frames = 20
 adaptation_rate = 0.05
 foreground_margin_percent = 15.0
 
@@ -336,6 +336,9 @@ hover_learning_max_tilt_deg = 8.0
 # Газ вне этого диапазона не считается режимом висения.
 hover_learning_min_throttle = 600
 hover_learning_max_throttle = 1500
+# При FOLLOW немедленно передавать CH1–CH4 Raspberry после свежего MSP-снимка.
+# Начальный газ берётся из обучения или текущего CH3 пилота, без фиксированного значения.
+immediate_follow_takeover = true
 
 [follow.range]
 # Горизонтальный допуск относительно центра кадра, в процентах ширины полукадра.

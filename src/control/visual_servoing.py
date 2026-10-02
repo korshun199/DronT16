@@ -104,6 +104,8 @@ class VisualServoConfig:
     hover_learning_max_tilt_deg: float
     hover_learning_min_throttle: int
     hover_learning_max_throttle: int
+    # Разрешает немедленный перехват после подтверждённого режима FOLLOW.
+    immediate_follow_takeover: bool
 
     def validate(self) -> None:
         """Отклоняет параметры, способные сделать контур непредсказуемым."""
@@ -245,6 +247,7 @@ def build_visual_servo_config(
         hover_learning_max_tilt_deg=float(section["hover_learning_max_tilt_deg"]),
         hover_learning_min_throttle=int(section["hover_learning_min_throttle"]),
         hover_learning_max_throttle=int(section["hover_learning_max_throttle"]),
+        immediate_follow_takeover=bool(section["immediate_follow_takeover"]),
     )
     config.validate()
     return config
@@ -430,10 +433,16 @@ class VisualServoController:
         if starting_follow:
             self._start_follow(live_channels, target, sensor, now)
 
-        # Не фиксируем высоту и газ одним кадром в момент перевода CH6.
-        # Пока пилот ещё набирает/снижает высоту, его RC-кадр проходит без
-        # изменений: RPI ждёт спокойный участок и только затем перехватывает
-        # CH1–CH4 для FOLLOW.
+        # При включённом немедленном режиме опора высоты и газа создаётся в
+        # _start_follow, поэтому первый валидный MSP-кадр уже управляется RPI.
+        # Старый режим ожидания оставлен для стендовой диагностики.
+        if starting_follow and cfg.immediate_follow_takeover:
+            events.append(
+                "FOLLOW: немедленный перехват RPI; "
+                f"H_ref={self.hold_altitude_m:.2f}m "
+                f"CH2_ref={live_channels[cfg.pitch_channel]} "
+                f"CH3_ref={self.hover_reference:.0f}"
+            )
         if self.hold_altitude_m is None:
             if self._collect_altitude_reference(live_channels, sensor, now):
                 events.append(
@@ -579,16 +588,30 @@ class VisualServoController:
         sensor: SensorSample,
         now: float,
     ) -> None:
-        """Начинает сбор спокойной опоры высоты перед автоматическим FOLLOW."""
+        """Начинает FOLLOW и выбирает опоры высоты и продольной скорости."""
         cfg = self.config
-        self.state = VisualServoState.ALTITUDE_HOLD
-        self.hold_altitude_m = None
-        self._reference_started_at = now
+        immediate = cfg.immediate_follow_takeover
+        self.state = VisualServoState.FOLLOW if immediate else VisualServoState.ALTITUDE_HOLD
+        self.hold_altitude_m = float(sensor.altitude_m or 0.0) if immediate else None
+        self._reference_started_at = None if immediate else now
         self._reference_altitudes = []
         self._reference_throttles = []
         self._reference_pitches = []
         self.scale_reference = float(target.scale_percent or cfg.min_scale_percent)
-        self.forward_pitch_reference_deg = 0.0
+        if immediate and cfg.forward_pitch_reference_enabled:
+            # CH2 в ACRO — команда темпа движения вперёд. Переводим её в
+            # эквивалентную опору угла, чтобы автомат не обнулял скорость,
+            # заданную пилотом в момент включения сопровождения.
+            pitch_delta = channels[cfg.pitch_channel] - cfg.rc_center
+            self.forward_pitch_reference_deg = max(
+                -cfg.forward_pitch_reference_max_deg,
+                min(
+                    cfg.forward_pitch_reference_max_deg,
+                    pitch_delta / (cfg.attitude_kp * cfg.pitch_rc_direction),
+                ),
+            )
+        else:
+            self.forward_pitch_reference_deg = 0.0
         self.altitude_integral = 0.0
         self.last_time = now
         self.last_roll_error = float(target.normalized_x or 0.0)
@@ -602,7 +625,16 @@ class VisualServoController:
         self.state_started_at = now
         self.last_calculation_at = None
         self.last_control_values = None
-        self.last_throttle_command = None
+        if immediate:
+            # Приоритет не у фиксированного газа: берём обученную опору, а
+            # если её ещё нет — фактический CH3 пилота и затем корректируем
+            # его по высоте/вариометру.
+            self.hover_reference = self.hover_reference or float(
+                self._clamp_rc(channels[cfg.throttle_channel])
+            )
+            self.last_throttle_command = self.hover_reference
+        else:
+            self.last_throttle_command = None
         self._last_altitude_log_at = None
 
     def _reset(self, state: VisualServoState) -> tuple[str, ...]:

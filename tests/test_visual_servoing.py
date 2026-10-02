@@ -98,15 +98,17 @@ def config(**overrides: object) -> VisualServoConfig:
         "hover_learning_max_tilt_deg": 8.0,
         "hover_learning_min_throttle": 600,
         "hover_learning_max_throttle": 1500,
+        "immediate_follow_takeover": True,
     }
     values.update(overrides)
     return VisualServoConfig(**values)  # type: ignore[arg-type]
 
 
-def rc_frame(throttle: int = 1100, ch5: int = 1792, ch6: int = 1792,
-             ch7: int = 191) -> tuple[bytes, tuple[int, ...]]:
+def rc_frame(throttle: int = 1100, pitch: int = 992, ch5: int = 1792,
+             ch6: int = 1792, ch7: int = 191) -> tuple[bytes, tuple[int, ...]]:
     """Формирует полный проверенный CRSF-кадр для теста."""
     channels = [992] * 16
+    channels[1] = pitch
     channels[2] = throttle
     channels[4] = ch5
     channels[5] = ch6
@@ -142,45 +144,36 @@ class VisualServoTests(unittest.TestCase):
         self.assertEqual(capture.output_frame, frame)
         self.assertEqual(capture.state, VisualServoState.CAPTURE)
 
-    def test_follow_waits_for_height_then_starts_arc_without_yaw_alignment(self) -> None:
-        """Дуга включается после высоты, без отдельного разворота носа."""
+    def test_follow_takes_over_immediately_and_starts_arc_without_yaw_alignment(self) -> None:
+        """FOLLOW сразу применяет удержание высоты и дугу без разворота на месте."""
         controller = VisualServoController(config())
         frame, channels = rc_frame(throttle=1100)
         controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
 
         first = controller.process(frame, channels, "FOLLOW", target(0.1), sensor(0.1), 0.1, armed=True)
-        self.assertEqual(first.state, VisualServoState.ALTITUDE_HOLD)
-        self.assertEqual(first.computed_channels[1], 992)
-        self.assertEqual(first.computed_channels[3], 992)
-        altitude = controller.process(frame, channels, "FOLLOW", target(0.16), sensor(0.16), 0.16, armed=True)
-        self.assertEqual(altitude.state, VisualServoState.ALTITUDE_HOLD)
+        self.assertEqual(first.state, VisualServoState.FOLLOW)
+        self.assertEqual(first.computed_channels[2], channels[2])
         follow = controller.process(frame, channels, "FOLLOW", target(0.27), sensor(0.27), 0.27, armed=True)
-        self.assertEqual(follow.state, VisualServoState.FOLLOW)
         moved = controller.process(
             frame, channels, "FOLLOW", target(0.38, scale=2.0), sensor(0.38), 0.38, armed=True
         )
         self.assertGreater(moved.computed_channels[1], 992)
 
-    def test_follow_waits_for_a_stable_altitude_reference(self) -> None:
-        """FOLLOW не перехватывает CH1–CH4, пока пилот ещё набирает высоту."""
+    def test_follow_takes_over_even_when_throttle_is_below_hover_range(self) -> None:
+        """FOLLOW не блокируется низким CH3 и начинает коррекцию высоты сразу."""
         controller = VisualServoController(
             config(output_mode="real", altitude_reference_window_s=0.10)
         )
-        frame, channels = rc_frame(throttle=1100)
+        frame, channels = rc_frame(throttle=191)
         controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
 
         climbing = controller.process(
             frame, channels, "FOLLOW", target(0.1), sensor(0.1, vario=0.5), 0.1, armed=True
         )
-        self.assertEqual(climbing.state, VisualServoState.ALTITUDE_HOLD)
-        self.assertFalse(climbing.output_applied)
-        self.assertEqual(climbing.output_frame, frame)
-
-        ready = controller.process(
-            frame, channels, "FOLLOW", target(0.2), sensor(0.2), 0.2, armed=True
-        )
-        self.assertTrue(ready.output_applied)
-        self.assertTrue(any(event.startswith("FOLLOW -> ALTITUDE_HOLD") for event in ready.events))
+        self.assertEqual(climbing.state, VisualServoState.FOLLOW)
+        self.assertTrue(climbing.output_applied)
+        self.assertEqual(climbing.computed_channels[0], channels[0])
+        self.assertEqual(climbing.computed_channels[2], channels[2])
 
     def test_altitude_priority_weakens_but_does_not_cancel_follow(self) -> None:
         """Ошибка высоты ослабляет дугу, сохраняя FOLLOW и направление к цели."""
@@ -314,8 +307,8 @@ class VisualServoTests(unittest.TestCase):
         held = controller.process(
             frame, channels, "FOLLOW", target(0.1, x=1.0), sensor(0.1), 0.1, armed=True
         )
-        self.assertEqual(held.state, VisualServoState.ALTITUDE_HOLD)
-        self.assertEqual(held.computed_channels[3], 992)
+        self.assertEqual(held.state, VisualServoState.FOLLOW)
+        self.assertGreater(held.computed_channels[3], 992)
 
     def test_follow_yaw_is_smoothed_and_slewed(self) -> None:
         """Yaw не перескакивает из центра к пределу за один видеокадр."""
@@ -412,7 +405,7 @@ class VisualServoTests(unittest.TestCase):
                 pitch_rate_slew_per_s=10000.0,
             )
         )
-        frame, channels = rc_frame()
+        frame, channels = rc_frame(pitch=1100)
         controller.process(frame, channels, "DIRECT", None, sensor(0.0, pitch=4.0), 0.0, armed=True)
         controller.process(frame, channels, "FOLLOW", target(0.1), sensor(0.1, pitch=4.0), 0.1, armed=True)
         controller.process(frame, channels, "FOLLOW", target(0.2), sensor(0.2, pitch=4.0), 0.2, armed=True)
@@ -480,7 +473,7 @@ class VisualServoTests(unittest.TestCase):
         )
         self.assertLess(result.computed_channels[0], 992)
         self.assertGreater(result.computed_channels[1], 992)
-        self.assertEqual(result.state, VisualServoState.ALTITUDE_HOLD)
+        self.assertEqual(result.state, VisualServoState.FOLLOW)
 
     def test_dry_run_calculates_but_does_not_change_frame(self) -> None:
         """Ноутбучный режим показывает расчёт, не выдавая его в транспорт."""
@@ -539,7 +532,7 @@ class VisualServoTests(unittest.TestCase):
         restarted = controller.process(
             frame, channels, "FOLLOW", target(0.4), sensor(0.4), 0.4, armed=True
         )
-        self.assertEqual(restarted.state, VisualServoState.ALTITUDE_HOLD)
+        self.assertEqual(restarted.state, VisualServoState.FOLLOW)
 
     def test_transient_stale_sensor_recovers_without_fault(self) -> None:
         """Краткий пропуск MSP повторяет последнюю команду и восстанавливается."""
