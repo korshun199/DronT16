@@ -62,6 +62,7 @@ class VisualServoConfig:
     altitude_reference_max_tilt_deg: float
     altitude_guard_error_m: float
     altitude_guard_vario_m_s: float
+    altitude_guard_confirmation_s: float
     altitude_authority_hard_error_m: float
     altitude_authority_hard_vario_m_s: float
     altitude_heading_min_authority: float
@@ -132,6 +133,8 @@ class VisualServoConfig:
             raise ValueError("Пределы спокойного полёта не могут быть отрицательными")
         if self.altitude_guard_error_m <= 0 or self.altitude_guard_vario_m_s <= 0:
             raise ValueError("Пределы защиты высоты должны быть положительными")
+        if self.altitude_guard_confirmation_s < 0:
+            raise ValueError("Время подтверждения защиты высоты не может быть отрицательным")
         if (
             self.altitude_authority_hard_error_m <= self.altitude_guard_error_m
             or self.altitude_authority_hard_vario_m_s <= self.altitude_guard_vario_m_s
@@ -205,6 +208,7 @@ def build_visual_servo_config(
         altitude_reference_max_tilt_deg=float(section["altitude_reference_max_tilt_deg"]),
         altitude_guard_error_m=float(section["altitude_guard_error_m"]),
         altitude_guard_vario_m_s=float(section["altitude_guard_vario_m_s"]),
+        altitude_guard_confirmation_s=float(section["altitude_guard_confirmation_s"]),
         altitude_authority_hard_error_m=float(section["altitude_authority_hard_error_m"]),
         altitude_authority_hard_vario_m_s=float(section["altitude_authority_hard_vario_m_s"]),
         altitude_heading_min_authority=float(section["altitude_heading_min_authority"]),
@@ -305,6 +309,9 @@ class VisualServoController:
         # Нельзя считать несколько кадров очереди за одну ошибку MSP: новое
         # подтверждение устаревания разрешено только раз за период контура.
         self._last_sensor_stale_check_at: float | None = None
+        # Время первого мягкого выхода за пределы высоты/вариометра. Нужен,
+        # чтобы одиночный барометрический выброс не отменял боковой манёвр.
+        self._altitude_guard_started_at: float | None = None
 
     def process(
         self,
@@ -477,7 +484,7 @@ class VisualServoController:
         dt = self._step_time(now)
         ex = float(target.normalized_x or 0.0)
         scale = float(target.scale_percent or cfg.min_scale_percent)
-        lateral_authority, heading_authority = self._follow_authority(sensor)
+        lateral_authority, heading_authority = self._follow_authority(sensor, now)
         desired_roll_target = 0.0
         if self.state is VisualServoState.FOLLOW and cfg.roll_follow_enabled:
             # Высота не выключает сопровождение скачком. Чем сильнее отклонение
@@ -636,6 +643,7 @@ class VisualServoController:
         else:
             self.last_throttle_command = None
         self._last_altitude_log_at = None
+        self._altitude_guard_started_at = None
 
     def _reset(self, state: VisualServoState) -> tuple[str, ...]:
         """Сбрасывает автономные опоры после выхода из FOLLOW или DISARM."""
@@ -666,6 +674,7 @@ class VisualServoController:
         self._target_lost_latched = False
         self._sensor_stale_count = 0
         self._last_sensor_stale_check_at = None
+        self._altitude_guard_started_at = None
         if previous != state:
             return (f"{previous.value} -> {state.value}: управление возвращено пилоту",)
         return ()
@@ -785,22 +794,43 @@ class VisualServoController:
             and abs(float(sensor.vario_m_s or 0.0)) <= cfg.vario_tolerance_m_s
         )
 
-    def _follow_authority(self, sensor: SensorSample) -> tuple[float, float]:
+    def _follow_authority(self, sensor: SensorSample, now: float) -> tuple[float, float]:
         """Возвращает доли власти боковой дуги и курса по фактической вертикали.
 
-        Мягкие пределы означают начало плавного ослабления горизонтального
-        движения, жёсткие — его полную остановку. Состояние остаётся FOLLOW:
-        при восстановлении высоты траектория возобновляется без нового CH6.
+        Мягкий выход за пределы подтверждается временем, чтобы один шумный
+        барометрический кадр не тормозил траекторию. Жёсткие пределы действуют
+        сразу. Состояние остаётся FOLLOW: после восстановления вертикали дуга
+        возобновляется без нового переключения CH6.
         """
         cfg = self.config
         reference = float(self.hold_altitude_m if self.hold_altitude_m is not None else sensor.altitude_m)
+        altitude_error = abs(reference - float(sensor.altitude_m))
+        vario_error = abs(float(sensor.vario_m_s or 0.0))
+        soft_exceeded = (
+            altitude_error > cfg.altitude_guard_error_m
+            or vario_error > cfg.altitude_guard_vario_m_s
+        )
+        hard_exceeded = (
+            altitude_error >= cfg.altitude_authority_hard_error_m
+            or vario_error >= cfg.altitude_authority_hard_vario_m_s
+        )
+        if not soft_exceeded:
+            self._altitude_guard_started_at = None
+            return 1.0, 1.0
+        if not hard_exceeded:
+            if self._altitude_guard_started_at is None:
+                self._altitude_guard_started_at = now
+            if now - self._altitude_guard_started_at < cfg.altitude_guard_confirmation_s:
+                return 1.0, 1.0
+        else:
+            self._altitude_guard_started_at = now
         altitude_authority = self._linear_authority(
-            abs(reference - float(sensor.altitude_m)),
+            altitude_error,
             cfg.altitude_guard_error_m,
             cfg.altitude_authority_hard_error_m,
         )
         vario_authority = self._linear_authority(
-            abs(float(sensor.vario_m_s or 0.0)),
+            vario_error,
             cfg.altitude_guard_vario_m_s,
             cfg.altitude_authority_hard_vario_m_s,
         )

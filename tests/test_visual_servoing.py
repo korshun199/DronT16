@@ -56,6 +56,7 @@ def config(**overrides: object) -> VisualServoConfig:
         "altitude_reference_max_tilt_deg": 6.0,
         "altitude_guard_error_m": 0.2,
         "altitude_guard_vario_m_s": 0.3,
+        "altitude_guard_confirmation_s": 0.0,
         "altitude_authority_hard_error_m": 0.6,
         "altitude_authority_hard_vario_m_s": 0.9,
         "altitude_heading_min_authority": 0.25,
@@ -223,6 +224,67 @@ class VisualServoTests(unittest.TestCase):
         self.assertEqual(guarded.state, VisualServoState.FOLLOW)
         self.assertEqual(guarded.computed_channels[0], 992)
         self.assertGreater(guarded.computed_channels[3], 992)
+
+    def test_soft_altitude_guard_requires_continuous_confirmation(self) -> None:
+        """Краткий барометрический выброс не отменяет крен до подтверждения."""
+        controller = VisualServoController(
+            config(
+                output_mode="real",
+                roll_follow_enabled=True,
+                altitude_guard_confirmation_s=0.30,
+                roll_rate_slew_per_s=10000.0,
+            )
+        )
+        frame, channels = rc_frame(throttle=1100)
+        controller.process(frame, channels, "FOLLOW", target(0.0), sensor(0.0), 0.0, armed=True)
+
+        pending = controller.process(
+            frame,
+            channels,
+            "FOLLOW",
+            target(0.10, x=1.0),
+            sensor(0.10, altitude=1.65),
+            0.10,
+            armed=True,
+        )
+        self.assertGreater(pending.computed_channels[0], 992)
+        self.assertFalse(any(event.startswith("ALTITUDE_PRIORITY") for event in pending.events))
+
+        confirmed = controller.process(
+            frame,
+            channels,
+            "FOLLOW",
+            target(0.45, x=1.0),
+            sensor(0.45, altitude=1.65),
+            0.45,
+            armed=True,
+        )
+        self.assertGreater(confirmed.computed_channels[0], 992)
+        self.assertTrue(any(event.startswith("ALTITUDE_PRIORITY") for event in confirmed.events))
+
+    def test_hard_altitude_guard_is_immediate_even_with_confirmation(self) -> None:
+        """Опасная ошибка высоты сразу центрирует крен, не ожидая тайм-аут."""
+        controller = VisualServoController(
+            config(
+                output_mode="real",
+                roll_follow_enabled=True,
+                altitude_guard_confirmation_s=1.0,
+                roll_rate_slew_per_s=10000.0,
+            )
+        )
+        frame, channels = rc_frame(throttle=1100)
+        controller.process(frame, channels, "FOLLOW", target(0.0), sensor(0.0), 0.0, armed=True)
+        guarded = controller.process(
+            frame,
+            channels,
+            "FOLLOW",
+            target(0.10, x=1.0),
+            sensor(0.10, altitude=0.8),
+            0.10,
+            armed=True,
+        )
+        self.assertEqual(guarded.computed_channels[0], 992)
+        self.assertTrue(any(event.startswith("ALTITUDE_PRIORITY") for event in guarded.events))
 
     def test_throttle_command_is_slewed(self) -> None:
         """Даже большая ошибка высоты не создаёт резкий скачок CH3."""
@@ -614,6 +676,10 @@ class VisualServoTests(unittest.TestCase):
         self.assertTrue(loaded.roll_follow_enabled)
         self.assertTrue(loaded.coordinated_yaw_enabled)
         self.assertTrue(loaded.roll_thrust_compensation_enabled)
+        self.assertAlmostEqual(loaded.roll_follow_deadband, 0.02)
+        self.assertAlmostEqual(loaded.roll_follow_max_angle_deg, 14.0)
+        self.assertEqual(loaded.roll_rate_max_correction, 160)
+        self.assertAlmostEqual(loaded.altitude_guard_confirmation_s, 0.35)
 
 
 if __name__ == "__main__":
