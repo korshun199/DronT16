@@ -73,6 +73,8 @@ def config(**overrides: object) -> VisualServoConfig:
         "pitch_max_angle_deg": 8.0,
         "pitch_direction": 1.0,
         "forward_pitch_reference_enabled": True,
+        "forward_pitch_reference_window_s": 0.35,
+        "throttle_reference_window_s": 0.35,
         "forward_pitch_reference_max_deg": 6.0,
         "pitch_rate_slew_per_s": 240.0,
         "roll_follow_enabled": False,
@@ -476,6 +478,84 @@ class VisualServoTests(unittest.TestCase):
         )
         self.assertEqual(result.state, VisualServoState.FOLLOW)
         self.assertGreater(result.computed_channels[1], 992)
+
+    def test_follow_uses_median_pilot_pitch_before_switch(self) -> None:
+        """FOLLOW сохраняет скорость пилота, а не центральный кадр тумблера."""
+        controller = VisualServoController(
+            config(
+                output_mode="real",
+                forward_pitch_reference_window_s=0.35,
+                pitch_rate_slew_per_s=10000.0,
+            )
+        )
+        for now, pitch in ((0.00, 1080), (0.10, 1100), (0.20, 1120)):
+            frame, channels = rc_frame(pitch=pitch)
+            controller.process(frame, channels, "DIRECT", None, sensor(now), now, armed=True)
+
+        # В кадре включения FOLLOW CH2 уже в центре: это не должно стереть
+        # сохранённую продольную скорость пилота.
+        frame, switched_channels = rc_frame(pitch=992)
+        result = controller.process(
+            frame,
+            switched_channels,
+            "FOLLOW",
+            target(0.25, scale=4.0),
+            sensor(0.25),
+            0.25,
+            armed=True,
+        )
+        self.assertEqual(result.state, VisualServoState.FOLLOW)
+        self.assertGreater(result.computed_channels[1], 992)
+        self.assertIn("CH2_ref=1100", result.events[0])
+
+    def test_follow_uses_median_pilot_throttle_before_switch(self) -> None:
+        """FOLLOW не теряет CH3 пилота из-за кадра переключения CH6."""
+        controller = VisualServoController(
+            config(output_mode="real", throttle_reference_window_s=0.35)
+        )
+        for now, throttle in ((0.00, 1050), (0.10, 1100), (0.20, 1150)):
+            frame, channels = rc_frame(throttle=throttle)
+            controller.process(frame, channels, "DIRECT", None, sensor(now), now, armed=True)
+
+        # В кадре FOLLOW CH3 ошибочно попал в минимум: должна остаться
+        # медиана ручного газа, то есть 1100.
+        frame, switched_channels = rc_frame(throttle=191)
+        result = controller.process(
+            frame,
+            switched_channels,
+            "FOLLOW",
+            target(0.25, scale=4.0),
+            sensor(0.25),
+            0.25,
+            armed=True,
+        )
+        self.assertEqual(result.state, VisualServoState.FOLLOW)
+        self.assertEqual(result.computed_channels[2], 1100)
+        self.assertIn("CH3_ref=1100 source=pilot_median", result.events[0])
+
+    def test_follow_keeps_low_throttle_without_creating_thrust(self) -> None:
+        """Низкий CH3 пилота остаётся низким: FOLLOW сам не создаёт тягу."""
+        controller = VisualServoController(config(output_mode="real"))
+        frame, channels = rc_frame(throttle=191)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+        result = controller.process(
+            frame, channels, "FOLLOW", target(0.1), sensor(0.1), 0.1, armed=True
+        )
+        self.assertEqual(result.computed_channels[2], 191)
+        self.assertIn("CH3_ref=191 source=pilot_median", result.events[0])
+
+    def test_follow_ignores_stale_pilot_pitch_before_switch(self) -> None:
+        """Старая команда CH2 не переживает заданное окно перед FOLLOW."""
+        controller = VisualServoController(
+            config(output_mode="real", forward_pitch_reference_window_s=0.20)
+        )
+        old_frame, old_channels = rc_frame(pitch=1200)
+        controller.process(old_frame, old_channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+        frame, channels = rc_frame(pitch=992)
+        result = controller.process(
+            frame, channels, "FOLLOW", target(1.0, scale=4.0), sensor(1.0), 1.0, armed=True
+        )
+        self.assertIn("CH2_ref=992", result.events[0])
 
     def test_target_loss_reports_reason_from_video_module(self) -> None:
         """Визуальный контур сохраняет точную причину, присланную камерой."""
