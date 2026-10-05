@@ -1066,10 +1066,19 @@ class VisualServoController:
         )
 
     def _pitch_correction_deg(self, scale: float, dt: float) -> float:
-        """Рассчитывает ограниченную добавку к pitch по размеру цели."""
+        """Рассчитывает только положительную добавку движения к цели.
+
+        Размер цели при захвате является опорой 100 %. Если объект стал
+        больше опоры, скорость пилота сохраняется: тормозящая коррекция не
+        формируется. Если объект стал меньше опоры, добавляется движение
+        вперёд с ограничением из конфигурации.
+        """
         cfg = self.config
         reference = max(cfg.min_scale_percent, float(self.scale_reference or scale))
-        error = -math.log(max(cfg.min_scale_percent, scale) / reference)
+        # Положительная ошибка означает, что объект стал меньше и нужно
+        # увеличить движение вперёд. Рост объекта намеренно не уменьшает
+        # скорость, поэтому отрицательная ошибка обнуляется.
+        error = max(0.0, -math.log(max(cfg.min_scale_percent, scale) / reference))
         derivative = 0.0 if dt <= 0 else (error - self.last_scale_error) / dt
         self.last_scale_error = error
         alpha = cfg.derivative_alpha
@@ -1079,8 +1088,15 @@ class VisualServoController:
         correction = 0.0
         if abs(error) > cfg.pitch_deadband:
             correction = cfg.pitch_direction * (
-            cfg.pitch_kp * error + cfg.pitch_kd * self.filtered_scale_derivative
+                cfg.pitch_kp * error + cfg.pitch_kd * self.filtered_scale_derivative
             )
+        # Не допускаем даже краткой тормозящей добавки из-за производной:
+        # FOLLOW может сохранить скорость пилота или увеличить её, но не
+        # уменьшать по одному лишь росту объекта.
+        if cfg.pitch_direction >= 0:
+            correction = max(0.0, correction)
+        else:
+            correction = min(0.0, correction)
         return max(-cfg.pitch_max_correction_deg, min(cfg.pitch_max_correction_deg, correction))
 
     def _roll_rate_command(self, measured_deg: float, target_deg: float, dt: float) -> int:

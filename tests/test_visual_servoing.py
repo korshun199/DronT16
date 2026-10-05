@@ -481,6 +481,34 @@ class VisualServoTests(unittest.TestCase):
         self.assertEqual(result.state, VisualServoState.FOLLOW)
         self.assertGreater(result.computed_channels[1], 992)
 
+    def test_follow_never_slows_when_object_grows(self) -> None:
+        """Рост объекта сохраняет скорость, а уменьшение может её увеличить."""
+        controller = VisualServoController(
+            config(
+                pitch_rate_slew_per_s=10000.0,
+                pitch_deadband=0.0,
+                pitch_kd=0.5,
+            )
+        )
+        frame, channels = rc_frame(pitch=1100)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+
+        controller.process(
+            frame, channels, "FOLLOW", target(0.1, scale=4.0), sensor(0.1), 0.1, armed=True
+        )
+        stable = controller.process(
+            frame, channels, "FOLLOW", target(0.2, scale=4.0), sensor(0.2), 0.2, armed=True
+        )
+        larger = controller.process(
+            frame, channels, "FOLLOW", target(0.3, scale=8.0), sensor(0.3), 0.3, armed=True
+        )
+        smaller = controller.process(
+            frame, channels, "FOLLOW", target(0.4, scale=2.0), sensor(0.4), 0.4, armed=True
+        )
+
+        self.assertGreaterEqual(larger.computed_channels[1], stable.computed_channels[1])
+        self.assertGreater(smaller.computed_channels[1], stable.computed_channels[1])
+
     def test_follow_uses_median_actual_pitch_before_switch(self) -> None:
         """FOLLOW сохраняет угол корпуса, даже если CH2 уже вернулся в центр."""
         controller = VisualServoController(
