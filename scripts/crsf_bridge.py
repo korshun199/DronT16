@@ -666,6 +666,14 @@ def main() -> int:
                             and result.state in (TakeoverState.LIVE, TakeoverState.TAKEOVER)
                             and (failsafe_result is None or failsafe_result.state.value == "LIVE")
                         )
+                        # DIRECT и CAPTURE не дают RPI управлять, но это именно
+                        # участок ручного полёта, из которого нужны реальные
+                        # опоры MSP и CH3 для плавного входа в FOLLOW.
+                        reference_learning_allowed = (
+                            selected_mode.value in {"DIRECT", "CAPTURE"}
+                            and result.state is TakeoverState.LIVE
+                            and (failsafe_result is None or failsafe_result.state.value == "LIVE")
+                        )
                         visual_result = visual_servo.process(
                             output_frame,
                             tuple(unpack_channels(output_frame[3:-1])),
@@ -675,6 +683,8 @@ def main() -> int:
                             now,
                             armed=not result.disarmed,
                             takeover_allowed=visual_takeover_allowed,
+                            reference_learning_allowed=reference_learning_allowed,
+                            pilot_reference_channels=channels,
                         )
                         output_frame = visual_result.output_frame
                         if visual_result.output_applied:
@@ -769,6 +779,7 @@ def main() -> int:
                             timeout_now,
                             armed=True,
                             takeover_allowed=(selected_mode.value == "FOLLOW"),
+                            reference_learning_allowed=False,
                         )
                         output_frame = visual_result.output_frame
                         for event in visual_result.events:

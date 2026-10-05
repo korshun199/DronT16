@@ -83,6 +83,8 @@ class VisualServoConfig:
     forward_pitch_reference_window_s: float
     throttle_reference_window_s: float
     forward_pitch_reference_max_deg: float
+    follow_entry_blend_s: float
+    pitch_max_correction_deg: float
     pitch_rate_slew_per_s: float
     roll_follow_enabled: bool
     roll_follow_deadband: float
@@ -157,6 +159,8 @@ class VisualServoConfig:
             self.forward_pitch_reference_window_s < 0
             or self.throttle_reference_window_s < 0
             or self.forward_pitch_reference_max_deg < 0
+            or self.follow_entry_blend_s < 0
+            or self.pitch_max_correction_deg < 0
             or self.pitch_rate_slew_per_s <= 0
         ):
             raise ValueError("Параметры сохранения движения вперёд должны быть положительными")
@@ -236,6 +240,8 @@ def build_visual_servo_config(
         forward_pitch_reference_window_s=float(section["forward_pitch_reference_window_s"]),
         throttle_reference_window_s=float(section["throttle_reference_window_s"]),
         forward_pitch_reference_max_deg=float(section["forward_pitch_reference_max_deg"]),
+        follow_entry_blend_s=float(section["follow_entry_blend_ms"]) / 1000.0,
+        pitch_max_correction_deg=float(section["pitch_max_correction_deg"]),
         pitch_rate_slew_per_s=float(section["pitch_rate_slew_per_s"]),
         roll_follow_enabled=bool(section["roll_follow_enabled"]),
         roll_follow_deadband=float(section["roll_follow_deadband"]),
@@ -294,10 +300,12 @@ class VisualServoController:
         self._reference_altitudes: list[float] = []
         self._reference_throttles: list[float] = []
         self._reference_pitches: list[float] = []
-        # История ручной команды CH2 перед FOLLOW. Она хранит только короткое
-        # окно, поэтому переключение тумблера не может подменить скорость
-        # пилота одиночным кадром с центральным положением стика.
-        self._pilot_pitch_history: deque[tuple[float, int]] = deque()
+        # В ACRO CH2 задаёт скорость вращения, а не угол корпуса. Поэтому для
+        # сохранения движения вперёд запоминаем реальный pitch из MSP.
+        self._pilot_pitch_angle_history: deque[tuple[float, float]] = deque()
+        # Высота сохраняется в том же коротком окне, чтобы один шумный пакет
+        # барометра в момент переключения не становился опорой FOLLOW.
+        self._pilot_altitude_history: deque[tuple[float, float]] = deque()
         # История CH3 нужна по той же причине: после переключения FOLLOW
         # полётная тяга берётся из ручного участка, а не из кадра тумблера.
         self._pilot_throttle_history: deque[tuple[float, int]] = deque()
@@ -305,7 +313,8 @@ class VisualServoController:
         # Опора движения вперёд — реальный спокойный наклон корпуса пилота.
         # Это не скорость в м/с: для неё потребуется GPS с фиксом или optical flow.
         self.forward_pitch_reference_deg = 0.0
-        self.forward_pitch_reference_channel = config.rc_center
+        self.forward_pitch_reference_source = "msp_live_fallback"
+        self.hold_altitude_source = "msp_live_fallback"
         self.throttle_reference_channel = config.rc_center
         self.throttle_reference_source = "live_fallback"
         self.altitude_integral = 0.0
@@ -344,24 +353,32 @@ class VisualServoController:
         *,
         armed: bool,
         takeover_allowed: bool = True,
+        reference_learning_allowed: bool = True,
+        pilot_reference_channels: tuple[int, ...] | None = None,
     ) -> VisualServoResult:
         """Обрабатывает снимок цели и возвращает исходный либо изменённый RC-кадр."""
         cfg = self.config
         live_channels = tuple(channels)
+        reference_channels = (
+            tuple(pilot_reference_channels)
+            if pilot_reference_channels is not None
+            else live_channels
+        )
         mode = receiver_mode.upper()
 
         if not armed:
             self.hover_reference = None
-            self._pilot_pitch_history.clear()
+            self._pilot_pitch_angle_history.clear()
+            self._pilot_altitude_history.clear()
             self._pilot_throttle_history.clear()
             events = self._reset(VisualServoState.DIRECT)
             return VisualServoResult(frame, VisualServoState.DIRECT, events, live_channels, False)
 
         if not takeover_allowed or mode != "FOLLOW" or not cfg.enabled:
             passive_state = VisualServoState.CAPTURE if mode == "CAPTURE" and armed else VisualServoState.DIRECT
-            if takeover_allowed:
-                self._learn_hover_reference(live_channels, sensor, now, armed)
-                self._remember_pilot_controls(live_channels, now)
+            if reference_learning_allowed and cfg.enabled:
+                self._learn_hover_reference(reference_channels, sensor, now, armed)
+                self._remember_pilot_references(reference_channels, sensor, now)
             events = self._reset(passive_state)
             return VisualServoResult(frame, passive_state, events, live_channels, False)
 
@@ -470,10 +487,11 @@ class VisualServoController:
             events.append(
                 "FOLLOW: немедленный перехват RPI; "
                 f"H_ref={self.hold_altitude_m:.2f}m "
-                f"CH2_ref={self.forward_pitch_reference_channel} "
+                f"height_source={self.hold_altitude_source} "
                 f"pitch_ref={self.forward_pitch_reference_deg:+.2f}deg "
+                f"pitch_source={self.forward_pitch_reference_source} "
                 f"CH3_ref={self.throttle_reference_channel} "
-                f"source={self.throttle_reference_source}"
+                f"throttle_source={self.throttle_reference_source}"
             )
         if self.hold_altitude_m is None:
             if self._collect_altitude_reference(live_channels, sensor, now):
@@ -533,7 +551,12 @@ class VisualServoController:
         integral_allowed = self._altitude_is_stable(sensor) and (
             self._state_age(now) >= cfg.altitude_integral_activation_s
         )
+        entry_authority = self._follow_entry_authority(now)
         raw_throttle_command = self._altitude_command(sensor, dt, integrate=integral_allowed)
+        # В первом кадре FOLLOW газ равен сохранённой команде пилота. Далее
+        # вертикальная поправка плавно включается без ступени тяги.
+        hover = float(self.hover_reference or cfg.rc_center)
+        raw_throttle_command = hover + (raw_throttle_command - hover) * entry_authority
         throttle_command = self._slew_throttle(raw_throttle_command, dt)
         output_channels = list(live_channels)
         # В ACRO CH1 задаёт угловую скорость. Raspberry замыкает внешний
@@ -574,7 +597,13 @@ class VisualServoController:
                     f"pitch_ref={self.forward_pitch_reference_deg:+.2f}deg "
                     f"authority={lateral_authority:.2f}"
                 )
-            target_pitch_deg = self._pitch_target_deg(scale, dt) * lateral_authority
+            # Приоритет высоты ослабляет только визуальную добавку к движению,
+            # но не стирает сохранённый фактический наклон пилота.
+            pitch_correction_deg = self._pitch_correction_deg(scale, dt)
+            target_pitch_deg = self.forward_pitch_reference_deg + (
+                pitch_correction_deg * lateral_authority * entry_authority
+            )
+            target_pitch_deg = max(-cfg.pitch_max_angle_deg, min(cfg.pitch_max_angle_deg, target_pitch_deg))
             output_channels[cfg.pitch_channel] = self._attitude_command(
                 sensor.pitch_deg, target_pitch_deg, cfg.pitch_rc_direction, dt
             )
@@ -624,28 +653,32 @@ class VisualServoController:
         cfg = self.config
         immediate = cfg.immediate_follow_takeover
         self.state = VisualServoState.FOLLOW if immediate else VisualServoState.ALTITUDE_HOLD
-        self.hold_altitude_m = float(sensor.altitude_m or 0.0) if immediate else None
+        self.hold_altitude_m = None
         self._reference_started_at = None if immediate else now
         self._reference_altitudes = []
         self._reference_throttles = []
         self._reference_pitches = []
         self.scale_reference = float(target.scale_percent or cfg.min_scale_percent)
         if immediate and cfg.forward_pitch_reference_enabled:
-            # CH2 в ACRO — команда темпа движения вперёд. Берём медиану
-            # короткого участка РУЧНОГО полёта до FOLLOW, а не текущий кадр:
-            # при щелчке тумблера CH2 иногда кратко приходит в центр.
-            self.forward_pitch_reference_channel = self._pilot_pitch_reference(channels, now)
-            pitch_delta = self.forward_pitch_reference_channel - cfg.rc_center
+            # Опора движения — фактический наклон Betaflight, а не CH2:
+            # в ACRO центральный CH2 означает нулевой темп вращения, но корпус
+            # может уже быть наклонён и двигаться вперёд.
+            (
+                self.forward_pitch_reference_deg,
+                self.forward_pitch_reference_source,
+            ) = self._pilot_pitch_angle_reference(sensor, now)
+            raw_pitch_reference = self.forward_pitch_reference_deg
             self.forward_pitch_reference_deg = max(
                 -cfg.forward_pitch_reference_max_deg,
-                min(
-                    cfg.forward_pitch_reference_max_deg,
-                    pitch_delta / (cfg.attitude_kp * cfg.pitch_rc_direction),
-                ),
+                min(cfg.forward_pitch_reference_max_deg, self.forward_pitch_reference_deg),
             )
+            if self.forward_pitch_reference_deg != raw_pitch_reference:
+                self.forward_pitch_reference_source += "_clamped"
         else:
-            self.forward_pitch_reference_channel = cfg.rc_center
             self.forward_pitch_reference_deg = 0.0
+            self.forward_pitch_reference_source = "disabled"
+        if immediate:
+            self.hold_altitude_m, self.hold_altitude_source = self._pilot_altitude_reference(sensor, now)
         self.altitude_integral = 0.0
         self.last_time = now
         self.last_roll_error = float(target.normalized_x or 0.0)
@@ -687,7 +720,8 @@ class VisualServoController:
         self._reference_pitches = []
         self.scale_reference = None
         self.forward_pitch_reference_deg = 0.0
-        self.forward_pitch_reference_channel = self.config.rc_center
+        self.forward_pitch_reference_source = "msp_live_fallback"
+        self.hold_altitude_source = "msp_live_fallback"
         self.throttle_reference_channel = self.config.rc_center
         self.throttle_reference_source = "live_fallback"
         self.altitude_integral = 0.0
@@ -713,18 +747,27 @@ class VisualServoController:
             return (f"{previous.value} -> {state.value}: управление возвращено пилоту",)
         return ()
 
-    def _remember_pilot_controls(self, channels: tuple[int, ...], now: float) -> None:
-        """Сохраняет короткую историю ручных CH2 и CH3 перед FOLLOW."""
+    def _remember_pilot_references(
+        self, channels: tuple[int, ...], sensor: SensorSample | None, now: float
+    ) -> None:
+        """Сохраняет ручной газ и реальные опоры MSP до включения FOLLOW."""
         cfg = self.config
         pitch_window_s = cfg.forward_pitch_reference_window_s
         throttle_window_s = cfg.throttle_reference_window_s
         if not cfg.forward_pitch_reference_enabled or pitch_window_s <= 0:
-            self._pilot_pitch_history.clear()
+            self._pilot_pitch_angle_history.clear()
+            self._pilot_altitude_history.clear()
         else:
-            self._pilot_pitch_history.append((now, int(channels[cfg.pitch_channel])))
             oldest = now - pitch_window_s
-            while self._pilot_pitch_history and self._pilot_pitch_history[0][0] < oldest:
-                self._pilot_pitch_history.popleft()
+            if sensor is not None and sensor.is_fresh(now, cfg.sensor_max_age_s):
+                if sensor.pitch_deg is not None:
+                    self._pilot_pitch_angle_history.append((now, float(sensor.pitch_deg)))
+                if sensor.altitude_m is not None:
+                    self._pilot_altitude_history.append((now, float(sensor.altitude_m)))
+            while self._pilot_pitch_angle_history and self._pilot_pitch_angle_history[0][0] < oldest:
+                self._pilot_pitch_angle_history.popleft()
+            while self._pilot_altitude_history and self._pilot_altitude_history[0][0] < oldest:
+                self._pilot_altitude_history.popleft()
         if throttle_window_s <= 0:
             self._pilot_throttle_history.clear()
             return
@@ -733,17 +776,30 @@ class VisualServoController:
         while self._pilot_throttle_history and self._pilot_throttle_history[0][0] < oldest:
             self._pilot_throttle_history.popleft()
 
-    def _pilot_pitch_reference(self, channels: tuple[int, ...], now: float) -> int:
-        """Возвращает медиану CH2 пилота перед FOLLOW с безопасным fallback."""
+    def _pilot_pitch_angle_reference(
+        self, sensor: SensorSample, now: float
+    ) -> tuple[float, str]:
+        """Возвращает медиану реального pitch MSP с безопасным fallback."""
         cfg = self.config
         window_s = cfg.forward_pitch_reference_window_s
         if window_s <= 0:
-            return self._clamp_rc(channels[cfg.pitch_channel])
+            return float(sensor.pitch_deg or 0.0), "msp_live_fallback"
         oldest = now - window_s
-        values = [value for timestamp, value in self._pilot_pitch_history if timestamp >= oldest]
+        values = [value for timestamp, value in self._pilot_pitch_angle_history if timestamp >= oldest]
         if not values:
-            return self._clamp_rc(channels[cfg.pitch_channel])
-        return self._clamp_rc(round(statistics.median(values)))
+            return float(sensor.pitch_deg or 0.0), "msp_live_fallback"
+        return float(statistics.median(values)), "msp_median"
+
+    def _pilot_altitude_reference(self, sensor: SensorSample, now: float) -> tuple[float, str]:
+        """Возвращает медиану высоты перед FOLLOW с безопасным fallback."""
+        window_s = self.config.forward_pitch_reference_window_s
+        if window_s <= 0:
+            return float(sensor.altitude_m or 0.0), "msp_live_fallback"
+        oldest = now - window_s
+        values = [value for timestamp, value in self._pilot_altitude_history if timestamp >= oldest]
+        if not values:
+            return float(sensor.altitude_m or 0.0), "msp_live_fallback"
+        return float(statistics.median(values)), "msp_median"
 
     def _pilot_throttle_reference(
         self, channels: tuple[int, ...], now: float
@@ -935,6 +991,13 @@ class VisualServoController:
             return 0.0
         return max(0.0, min(0.2, now - previous))
 
+    def _follow_entry_authority(self, now: float) -> float:
+        """Плавно включает вертикальные и визуальные поправки после FOLLOW."""
+        duration = self.config.follow_entry_blend_s
+        if duration <= 0 or self.state_started_at is None:
+            return 1.0
+        return max(0.0, min(1.0, (now - self.state_started_at) / duration))
+
     def _coordinated_yaw_command(
         self, horizontal_error: float, horizontal_velocity: float, authority: float, dt: float
     ) -> int:
@@ -1002,8 +1065,8 @@ class VisualServoController:
             min(cfg.roll_follow_max_angle_deg, target_angle),
         )
 
-    def _pitch_target_deg(self, scale: float, dt: float) -> float:
-        """Рассчитывает требуемый угол pitch по относительному масштабу цели."""
+    def _pitch_correction_deg(self, scale: float, dt: float) -> float:
+        """Рассчитывает ограниченную добавку к pitch по размеру цели."""
         cfg = self.config
         reference = max(cfg.min_scale_percent, float(self.scale_reference or scale))
         error = -math.log(max(cfg.min_scale_percent, scale) / reference)
@@ -1018,8 +1081,7 @@ class VisualServoController:
             correction = cfg.pitch_direction * (
             cfg.pitch_kp * error + cfg.pitch_kd * self.filtered_scale_derivative
             )
-        target_angle = self.forward_pitch_reference_deg + correction
-        return max(-cfg.pitch_max_angle_deg, min(cfg.pitch_max_angle_deg, target_angle))
+        return max(-cfg.pitch_max_correction_deg, min(cfg.pitch_max_correction_deg, correction))
 
     def _roll_rate_command(self, measured_deg: float, target_deg: float, dt: float) -> int:
         """Преобразует ошибку roll в плавную ограниченную RC-rate команду ACRO."""
