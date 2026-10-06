@@ -7,6 +7,7 @@ import unittest
 
 from src.control.target_control import TargetGuidance
 from src.control.visual_servoing import (
+    LateralControlState,
     VisualServoConfig,
     VisualServoController,
     VisualServoState,
@@ -86,7 +87,12 @@ def config(**overrides: object) -> VisualServoConfig:
         "roll_follow_max_angle_deg": 8.0,
         "roll_follow_direction": 1.0,
         "roll_brake_lookahead_s": 0.25,
+        "roll_brake_max_lookahead_s": 0.65,
         "roll_brake_derivative_deadband": 0.03,
+        "roll_brake_enter_velocity_per_s": 0.08,
+        "roll_brake_exit_velocity_per_s": 0.035,
+        "roll_brake_full_velocity_per_s": 0.35,
+        "roll_brake_center_band": 0.08,
         "roll_angle_to_rate_kp": 18.0,
         "roll_rate_max_correction": 160,
         "roll_rate_slew_per_s": 480.0,
@@ -95,6 +101,7 @@ def config(**overrides: object) -> VisualServoConfig:
         "coordinated_yaw_max_correction": 60,
         "coordinated_yaw_direction": 1.0,
         "coordinated_yaw_brake_kd": 0.0,
+        "coordinated_yaw_brake_authority": 0.35,
         "yaw_error_alpha": 1.0,
         "yaw_slew_per_s": 240.0,
         "roll_thrust_compensation_enabled": True,
@@ -442,7 +449,11 @@ class VisualServoTests(unittest.TestCase):
                 roll_follow_kp=8.0,
                 roll_follow_kd=0.0,
                 roll_brake_lookahead_s=1.0,
+                roll_brake_max_lookahead_s=1.0,
                 roll_brake_derivative_deadband=0.0,
+                roll_brake_enter_velocity_per_s=0.01,
+                roll_brake_exit_velocity_per_s=0.005,
+                roll_brake_full_velocity_per_s=0.02,
                 roll_angle_to_rate_kp=30.0,
                 roll_rate_max_correction=200,
                 roll_rate_slew_per_s=10000.0,
@@ -460,6 +471,80 @@ class VisualServoTests(unittest.TestCase):
         )
         self.assertGreater(moving_right.computed_channels[0], 992)
         self.assertLess(braking.computed_channels[0], 992)
+        self.assertEqual(controller.lateral_state, LateralControlState.BRAKE)
+
+    def test_lateral_brake_uses_adaptive_prediction_and_returns_to_center(self) -> None:
+        """BRAKE заранее меняет знак крена и завершается без дрожания."""
+        controller = VisualServoController(
+            config(
+                roll_follow_enabled=True,
+                derivative_alpha=1.0,
+                roll_follow_kp=10.0,
+                roll_follow_kd=0.0,
+                roll_brake_lookahead_s=0.10,
+                roll_brake_max_lookahead_s=0.60,
+                roll_brake_enter_velocity_per_s=0.10,
+                roll_brake_exit_velocity_per_s=0.02,
+                roll_brake_full_velocity_per_s=0.30,
+                roll_brake_center_band=0.08,
+                roll_angle_to_rate_kp=30.0,
+                roll_rate_max_correction=200,
+                roll_rate_slew_per_s=10000.0,
+            )
+        )
+        frame, channels = rc_frame()
+        controller.process(frame, channels, "FOLLOW", target(0.0, x=-0.8), sensor(0.0), 0.0, armed=True)
+        # Цель быстро идёт слева к центру. Длинный прогноз уже пересекает
+        # центр, поэтому команда должна стать обратной до фактического нуля.
+        braking = controller.process(
+            frame, channels, "FOLLOW", target(0.1, x=-0.05), sensor(0.1), 0.1, armed=True
+        )
+        self.assertEqual(controller.lateral_state, LateralControlState.BRAKE)
+        self.assertGreater(controller.last_roll_lookahead_s, 0.10)
+        self.assertGreater(braking.computed_channels[0], 992)
+
+        centered = controller.process(
+            frame, channels, "FOLLOW", target(0.2, x=-0.05), sensor(0.2), 0.2, armed=True
+        )
+        self.assertEqual(controller.lateral_state, LateralControlState.CENTER)
+        self.assertEqual(centered.computed_channels[0], 992)
+
+    def test_lateral_brake_weakens_coordinated_yaw(self) -> None:
+        """При торможении yaw слабее, чем при обычном заходе к цели."""
+        common = {
+            "roll_follow_enabled": True,
+            "derivative_alpha": 1.0,
+            "yaw_error_alpha": 1.0,
+            "coordinated_yaw_kp": 100.0,
+            "coordinated_yaw_brake_kd": 0.0,
+            "coordinated_yaw_brake_authority": 0.25,
+            "yaw_slew_per_s": 10000.0,
+        }
+        braking_controller = VisualServoController(config(**common))
+        tracking_controller = VisualServoController(
+            config(
+                **common,
+                roll_brake_enter_velocity_per_s=100.0,
+                roll_brake_full_velocity_per_s=100.0,
+            )
+        )
+        frame, channels = rc_frame()
+        for controller in (braking_controller, tracking_controller):
+            controller.process(
+                frame, channels, "FOLLOW", target(0.0, x=-0.8), sensor(0.0), 0.0, armed=True
+            )
+        braking = braking_controller.process(
+            frame, channels, "FOLLOW", target(0.1, x=-0.05), sensor(0.1), 0.1, armed=True
+        )
+        tracking = tracking_controller.process(
+            frame, channels, "FOLLOW", target(0.1, x=-0.05), sensor(0.1), 0.1, armed=True
+        )
+        self.assertEqual(braking_controller.lateral_state, LateralControlState.BRAKE)
+        self.assertEqual(tracking_controller.lateral_state, LateralControlState.TRACK)
+        self.assertLess(
+            abs(braking.computed_channels[3] - 992),
+            abs(tracking.computed_channels[3] - 992),
+        )
 
     def test_follow_preserves_reference_pitch_when_scale_is_stable(self) -> None:
         """Спокойный pitch пилота сохраняется как опора движения вперёд."""
@@ -878,7 +963,7 @@ class VisualServoTests(unittest.TestCase):
         )
         self.assertTrue(loaded.enabled)
         self.assertEqual(loaded.output_mode, "real")
-        self.assertAlmostEqual(loaded.control_period_s, 0.05)
+        self.assertAlmostEqual(loaded.control_period_s, 0.033)
         self.assertTrue(loaded.roll_follow_enabled)
         self.assertTrue(loaded.coordinated_yaw_enabled)
         self.assertTrue(loaded.roll_thrust_compensation_enabled)

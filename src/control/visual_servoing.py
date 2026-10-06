@@ -29,6 +29,19 @@ class VisualServoState(str, Enum):
     FAULT = "FAULT"
 
 
+class LateralControlState(str, Enum):
+    """Внутренние состояния бокового контура FOLLOW.
+
+    Они не меняют пользовательский режим FOLLOW. Нужны только для того,
+    чтобы отличать обычный заход к цели от гашения уже накопленной боковой
+    скорости по движению объекта в кадре.
+    """
+
+    CENTER = "CENTER"
+    TRACK = "TRACK"
+    BRAKE = "BRAKE"
+
+
 @dataclass(frozen=True)
 class VisualServoConfig:
     """Все проверяемые ограничения visual_servoing."""
@@ -93,7 +106,12 @@ class VisualServoConfig:
     roll_follow_max_angle_deg: float
     roll_follow_direction: float
     roll_brake_lookahead_s: float
+    roll_brake_max_lookahead_s: float
     roll_brake_derivative_deadband: float
+    roll_brake_enter_velocity_per_s: float
+    roll_brake_exit_velocity_per_s: float
+    roll_brake_full_velocity_per_s: float
+    roll_brake_center_band: float
     roll_angle_to_rate_kp: float
     roll_rate_max_correction: int
     roll_rate_slew_per_s: float
@@ -102,6 +120,7 @@ class VisualServoConfig:
     coordinated_yaw_max_correction: int
     coordinated_yaw_direction: float
     coordinated_yaw_brake_kd: float
+    coordinated_yaw_brake_authority: float
     yaw_error_alpha: float
     yaw_slew_per_s: float
     roll_thrust_compensation_enabled: bool
@@ -168,6 +187,14 @@ class VisualServoConfig:
             raise ValueError("Параметры бокового контура не могут быть отрицательными")
         if self.roll_brake_lookahead_s < 0 or self.roll_brake_derivative_deadband < 0:
             raise ValueError("Параметры торможения бокового движения не могут быть отрицательными")
+        if self.roll_brake_max_lookahead_s < self.roll_brake_lookahead_s:
+            raise ValueError("Максимальный прогноз торможения должен быть не меньше базового")
+        if not 0 <= self.roll_brake_exit_velocity_per_s <= self.roll_brake_enter_velocity_per_s:
+            raise ValueError("Скорости выхода и входа в торможение заданы неверно")
+        if self.roll_brake_full_velocity_per_s < self.roll_brake_enter_velocity_per_s:
+            raise ValueError("Полная скорость торможения должна быть не меньше порога входа")
+        if self.roll_brake_center_band < self.roll_follow_deadband:
+            raise ValueError("Полоса центра торможения должна включать мёртвую зону roll")
         if self.roll_angle_to_rate_kp <= 0 or self.roll_rate_max_correction <= 0:
             raise ValueError("Параметры ACRO-контура roll должны быть положительными")
         if self.roll_rate_slew_per_s <= 0:
@@ -176,6 +203,8 @@ class VisualServoConfig:
             raise ValueError("Параметры координированного yaw не могут быть отрицательными")
         if self.coordinated_yaw_brake_kd < 0:
             raise ValueError("Коэффициент торможения yaw не может быть отрицательным")
+        if not 0 <= self.coordinated_yaw_brake_authority <= 1:
+            raise ValueError("Власть yaw при торможении должна быть в диапазоне 0..1")
         if not 0 < self.yaw_error_alpha <= 1 or self.yaw_slew_per_s <= 0:
             raise ValueError("Сглаживание и скорость yaw должны быть положительными")
         if not self.rc_min <= self.hover_learning_min_throttle < self.hover_learning_max_throttle <= self.rc_max:
@@ -250,7 +279,12 @@ def build_visual_servo_config(
         roll_follow_max_angle_deg=float(section["roll_follow_max_angle_deg"]),
         roll_follow_direction=float(section["roll_follow_direction"]),
         roll_brake_lookahead_s=float(section["roll_brake_lookahead_s"]),
+        roll_brake_max_lookahead_s=float(section["roll_brake_max_lookahead_s"]),
         roll_brake_derivative_deadband=float(section["roll_brake_derivative_deadband"]),
+        roll_brake_enter_velocity_per_s=float(section["roll_brake_enter_velocity_per_s"]),
+        roll_brake_exit_velocity_per_s=float(section["roll_brake_exit_velocity_per_s"]),
+        roll_brake_full_velocity_per_s=float(section["roll_brake_full_velocity_per_s"]),
+        roll_brake_center_band=float(section["roll_brake_center_band"]),
         roll_angle_to_rate_kp=float(section["roll_angle_to_rate_kp"]),
         roll_rate_max_correction=int(section["roll_rate_max_correction"]),
         roll_rate_slew_per_s=float(section["roll_rate_slew_per_s"]),
@@ -259,6 +293,7 @@ def build_visual_servo_config(
         coordinated_yaw_max_correction=int(section["coordinated_yaw_max_correction"]),
         coordinated_yaw_direction=float(section["coordinated_yaw_direction"]),
         coordinated_yaw_brake_kd=float(section["coordinated_yaw_brake_kd"]),
+        coordinated_yaw_brake_authority=float(section["coordinated_yaw_brake_authority"]),
         yaw_error_alpha=float(section["yaw_error_alpha"]),
         yaw_slew_per_s=float(section["yaw_slew_per_s"]),
         roll_thrust_compensation_enabled=bool(section["roll_thrust_compensation_enabled"]),
@@ -325,6 +360,8 @@ class VisualServoController:
         self.last_yaw_correction = 0.0
         self.last_scale_error = 0.0
         self.filtered_roll_derivative = 0.0
+        self.lateral_state = LateralControlState.CENTER
+        self.last_roll_lookahead_s = config.roll_brake_lookahead_s
         self.filtered_yaw_error = 0.0
         self.filtered_scale_derivative = 0.0
         self.state_started_at: float | None = None
@@ -594,6 +631,8 @@ class VisualServoController:
                 events.append(
                     f"FOLLOW: roll target={follow_roll_target:.2f}deg "
                     f"error_x={ex:+.3f} image_vx={self.filtered_roll_derivative:+.3f}/s "
+                    f"lateral={self.lateral_state.value} "
+                    f"lookahead={self.last_roll_lookahead_s:.3f}s "
                     f"pitch_ref={self.forward_pitch_reference_deg:+.2f}deg "
                     f"authority={lateral_authority:.2f}"
                 )
@@ -687,6 +726,8 @@ class VisualServoController:
         self.last_yaw_correction = 0.0
         self.last_scale_error = 0.0
         self.filtered_roll_derivative = 0.0
+        self.lateral_state = LateralControlState.CENTER
+        self.last_roll_lookahead_s = cfg.roll_brake_lookahead_s
         self.filtered_yaw_error = 0.0
         self.filtered_scale_derivative = 0.0
         self.state_started_at = now
@@ -731,6 +772,8 @@ class VisualServoController:
         self.last_pitch_rate_correction = 0.0
         self.last_yaw_correction = 0.0
         self.filtered_roll_derivative = 0.0
+        self.lateral_state = LateralControlState.CENTER
+        self.last_roll_lookahead_s = self.config.roll_brake_lookahead_s
         self.filtered_yaw_error = 0.0
         self.filtered_scale_derivative = 0.0
         self.state_started_at = None
@@ -1018,12 +1061,17 @@ class VisualServoController:
             cfg.coordinated_yaw_enabled
             and abs(self.filtered_yaw_error) > cfg.roll_follow_deadband
         ):
+            yaw_authority = max(0.0, min(1.0, authority))
+            # Во время гашения боковой скорости yaw не должен продолжать
+            # закручивать корпус: главную работу выполняет обратный крен.
+            if self.lateral_state is LateralControlState.BRAKE:
+                yaw_authority *= cfg.coordinated_yaw_brake_authority
             requested = cfg.coordinated_yaw_direction * (
                 (
                     cfg.coordinated_yaw_kp * self.filtered_yaw_error
                     + cfg.coordinated_yaw_brake_kd * horizontal_velocity
                 )
-                * max(0.0, min(1.0, authority))
+                * yaw_authority
             )
         requested = max(
             -cfg.coordinated_yaw_max_correction,
@@ -1039,7 +1087,14 @@ class VisualServoController:
         return self._clamp_rc(round(cfg.rc_center + correction))
 
     def _roll_target_deg(self, error: float, dt: float) -> float:
-        """Рассчитывает требуемый боковой крен по горизонтальной ошибке цели."""
+        """Рассчитывает крен с прогнозом и гашением боковой инерции.
+
+        Из одного изображения нельзя отделить движение объекта от собственной
+        боковой скорости дрона. Поэтому BRAKE включается только когда цель
+        быстро идёт к центру и длинный прогноз уже пересекает его. В этом
+        случае следующий крен рассчитывается по прогнозу, а не по запаздывающей
+        текущей координате. Гистерезис скоростей не даёт состоянию дрожать.
+        """
         cfg = self.config
         derivative = 0.0 if dt <= 0 else (error - self.last_roll_error) / dt
         self.last_roll_error = error
@@ -1048,21 +1103,75 @@ class VisualServoController:
             alpha * derivative + (1.0 - alpha) * self.filtered_roll_derivative
         )
         position_error = 0.0 if abs(error) <= cfg.roll_follow_deadband else error
+
+        self._update_lateral_state(position_error, self.filtered_roll_derivative)
+        lookahead = self._roll_lookahead_s(self.filtered_roll_derivative)
+        self.last_roll_lookahead_s = lookahead
+        if (
+            self.lateral_state is LateralControlState.CENTER
+            and abs(error) <= cfg.roll_brake_center_band
+            and abs(self.filtered_roll_derivative) <= cfg.roll_brake_exit_velocity_per_s
+        ):
+            return 0.0
         if (
             position_error == 0.0
             and abs(self.filtered_roll_derivative) <= cfg.roll_brake_derivative_deadband
         ):
             return 0.0
-        # Ошибка меняется быстро — дрон уже получает боковую скорость. Прогноз
-        # на короткий горизонт уменьшает крен заранее, а при пересечении
-        # центра допускает ограниченный обратный крен для торможения.
-        predicted_error = position_error + cfg.roll_brake_lookahead_s * self.filtered_roll_derivative
+        # В TRACK берётся короткий прогноз. В BRAKE его горизонт растёт вместе
+        # со скоростью объекта в кадре, поэтому обратный крен начинается до
+        # фактического перелёта центра и успевает погасить инерцию.
+        predicted_error = position_error + lookahead * self.filtered_roll_derivative
         target_angle = cfg.roll_follow_direction * (
             cfg.roll_follow_kp * predicted_error + cfg.roll_follow_kd * self.filtered_roll_derivative
         )
         return max(
             -cfg.roll_follow_max_angle_deg,
             min(cfg.roll_follow_max_angle_deg, target_angle),
+        )
+
+    def _update_lateral_state(self, error: float, velocity: float) -> None:
+        """Переключает CENTER, TRACK и BRAKE по положению и скорости цели."""
+        cfg = self.config
+        speed = abs(velocity)
+        predicted = error + cfg.roll_brake_max_lookahead_s * velocity
+        approaches_center = error * velocity < 0.0
+        crosses_center = (
+            (error > 0.0 and predicted <= cfg.roll_brake_center_band)
+            or (error < 0.0 and predicted >= -cfg.roll_brake_center_band)
+        )
+
+        if self.lateral_state is LateralControlState.BRAKE:
+            # Из торможения выходим только после затухания скорости около
+            # центра. Это удерживает обратный крен, пока дрон ещё скользит.
+            if speed <= cfg.roll_brake_exit_velocity_per_s and abs(error) <= cfg.roll_brake_center_band:
+                self.lateral_state = LateralControlState.CENTER
+            return
+
+        if (
+            speed >= cfg.roll_brake_enter_velocity_per_s
+            and approaches_center
+            and crosses_center
+        ):
+            self.lateral_state = LateralControlState.BRAKE
+        elif abs(error) <= cfg.roll_follow_deadband and speed <= cfg.roll_brake_exit_velocity_per_s:
+            self.lateral_state = LateralControlState.CENTER
+        else:
+            self.lateral_state = LateralControlState.TRACK
+
+    def _roll_lookahead_s(self, velocity: float) -> float:
+        """Возвращает прогноз: короткий в TRACK, адаптивный в BRAKE."""
+        cfg = self.config
+        if self.lateral_state is not LateralControlState.BRAKE:
+            return cfg.roll_brake_lookahead_s
+        span = max(
+            1e-9,
+            cfg.roll_brake_full_velocity_per_s - cfg.roll_brake_enter_velocity_per_s,
+        )
+        fraction = (abs(velocity) - cfg.roll_brake_enter_velocity_per_s) / span
+        fraction = max(0.0, min(1.0, fraction))
+        return cfg.roll_brake_lookahead_s + (
+            (cfg.roll_brake_max_lookahead_s - cfg.roll_brake_lookahead_s) * fraction
         )
 
     def _pitch_correction_deg(self, scale: float, dt: float) -> float:
