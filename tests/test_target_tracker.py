@@ -31,7 +31,7 @@ class TargetTrackerTests(unittest.TestCase):
         """Сомнительный CSRT-кадр не меняет последнюю подтверждённую рамку."""
         frame = np.full((100, 100, 3), (20, 180, 230), dtype=np.uint8)
         target = TargetBox(20, 20, 40, 40)
-        verifier = TargetVerifier(method="adaptive", max_bad_frames=8)
+        verifier = TargetVerifier(method="adaptive", max_bad_frames=18)
         tracker = TargetTracker(verifier)
 
         with patch("src.target.tracker._make_tracker", return_value=_StaticOpenCvTracker()):
@@ -44,19 +44,19 @@ class TargetTrackerTests(unittest.TestCase):
         self.assertTrue(tracker.holding_last_confirmed_target)
         self.assertIn("action=hold_last_confirmed", tracker.last_diagnostic_detail)
 
-    def test_eighth_uncertain_frame_stops_tracking(self) -> None:
-        """После восьми сомнительных кадров FOLLOW обязан вернуть пилота."""
+    def test_eighteenth_uncertain_frame_stops_tracking(self) -> None:
+        """После 18 сомнительных кадров FOLLOW обязан вернуть пилота."""
         frame = np.full((100, 100, 3), (20, 180, 230), dtype=np.uint8)
         target = TargetBox(20, 20, 40, 40)
-        verifier = TargetVerifier(method="adaptive", max_bad_frames=8)
+        verifier = TargetVerifier(method="adaptive", max_bad_frames=18)
         tracker = TargetTracker(verifier)
 
         with patch("src.target.tracker._make_tracker", return_value=_StaticOpenCvTracker()):
             tracker.start(frame, target)
             # Два сравнения на каждый кадр: с исходной и рабочей моделями.
             # Исходная модель отвергает область, рабочая ещё узнаёт её.
-            with patch.object(verifier, "_similarity", side_effect=[0.20, 0.95] * 8):
-                for _ in range(7):
+            with patch.object(verifier, "_similarity", side_effect=[0.20, 0.95] * 18):
+                for _ in range(17):
                     self.assertEqual(tracker.update(frame), target)
                 self.assertIsNone(tracker.update(frame))
 
