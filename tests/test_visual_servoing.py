@@ -111,6 +111,19 @@ def config(**overrides: object) -> VisualServoConfig:
         "hover_learning_min_throttle": 600,
         "hover_learning_max_throttle": 1500,
         "immediate_follow_takeover": True,
+        "vertical_follow_enabled": False,
+        "vertical_follow_deadband_deg": 1.5,
+        "vertical_follow_error_alpha": 0.25,
+        "vertical_follow_derivative_alpha": 0.20,
+        "vertical_follow_gain_m_s_per_deg": 0.04,
+        "vertical_follow_kd_m_s_per_deg_s": 0.008,
+        "vertical_follow_max_derivative_deg_s": 20.0,
+        "vertical_follow_max_rate_m_s": 0.20,
+        "vertical_follow_max_offset_m": 0.50,
+        "vertical_follow_direction": 1.0,
+        "vertical_camera_roll_offset_deg": 0.0,
+        "vertical_roll_attitude_direction": 1.0,
+        "vertical_follow_max_tilt_deg": 25.0,
     }
     values.update(overrides)
     return VisualServoConfig(**values)  # type: ignore[arg-type]
@@ -130,9 +143,10 @@ def rc_frame(throttle: int = 1100, pitch: int = 992, ch5: int = 1792,
     return body + bytes((crc8_dvb_s2(body[2:]),)), tuple(channels)
 
 
-def target(now: float, x: float = 0.0, scale: float = 4.0) -> TargetGuidance:
+def target(now: float, x: float = 0.0, scale: float = 4.0,
+           y: float = 0.0) -> TargetGuidance:
     """Создаёт свежий снимок ранее выбранной цели."""
-    return TargetGuidance(True, x * 45.0, 0.0, now, "Следить", x, 0.0, scale)
+    return TargetGuidance(True, x * 45.0, -y * 30.0, now, "Следить", x, y, scale)
 
 
 def sensor(now: float, altitude: float = 2.0, vario: float = 0.0,
@@ -186,6 +200,213 @@ class VisualServoTests(unittest.TestCase):
         self.assertTrue(climbing.output_applied)
         self.assertEqual(climbing.computed_channels[0], channels[0])
         self.assertEqual(climbing.computed_channels[2], channels[2])
+
+    def test_vertical_follow_moves_altitude_reference_toward_target_elevation(self) -> None:
+        """Цель выше мирового горизонта плавно повышает H_ref через CH3-контур."""
+        controller = VisualServoController(
+            config(vertical_follow_enabled=True, altitude_kp=100.0)
+        )
+        frame, channels = rc_frame(throttle=1100)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.1), sensor(0.1), 0.1, armed=True)
+
+        result = controller.process(
+            frame, channels, "FOLLOW", target(0.2, y=-0.5), sensor(0.2), 0.2, armed=True
+        )
+
+        self.assertGreater(controller.hold_altitude_m or 0.0, 2.0)
+        self.assertGreater(result.computed_channels[2], channels[2])
+        self.assertEqual(result.computed_channels[0], channels[0])
+        self.assertEqual(result.computed_channels[1], channels[1])
+        self.assertEqual(result.computed_channels[3], channels[3])
+        report = controller.process(
+            frame, channels, "FOLLOW", target(0.4, y=-0.5), sensor(0.4), 0.4, armed=True
+        )
+        self.assertTrue(any(event.startswith("VERTICAL_FOLLOW:") for event in report.events))
+
+    def test_vertical_follow_moves_reference_down_for_target_below_horizon(self) -> None:
+        """Цель ниже горизонта должна снижать, а не повышать опорную высоту."""
+        controller = VisualServoController(
+            config(vertical_follow_enabled=True, altitude_kp=100.0)
+        )
+        frame, channels = rc_frame(throttle=1100)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.1), sensor(0.1), 0.1, armed=True)
+
+        controller.process(
+            frame, channels, "FOLLOW", target(0.2, y=0.5), sensor(0.2), 0.2, armed=True
+        )
+
+        self.assertLess(controller.hold_altitude_m or 2.0, 2.0)
+
+    def test_vertical_follow_damps_when_target_returns_to_center(self) -> None:
+        """Возврат цели к центру уменьшает вертикальную команду до смены знака."""
+        controller = VisualServoController(
+            config(
+                vertical_follow_enabled=True,
+                vertical_follow_deadband_deg=0.0,
+                vertical_follow_gain_m_s_per_deg=0.01,
+                vertical_follow_max_rate_m_s=0.5,
+            )
+        )
+        frame, channels = rc_frame(throttle=1100)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.1), sensor(0.1), 0.1, armed=True)
+        controller.process(
+            frame, channels, "FOLLOW", target(0.2, y=-0.5), sensor(0.2), 0.2, armed=True
+        )
+        controller.process(
+            frame, channels, "FOLLOW", target(0.3, y=-0.5), sensor(0.3), 0.3, armed=True
+        )
+        climbing_rate = controller.last_vertical_rate_command_m_s
+
+        controller.process(
+            frame, channels, "FOLLOW", target(0.4, y=-0.1), sensor(0.4), 0.4, armed=True
+        )
+
+        self.assertGreater(climbing_rate, 0.0)
+        self.assertLess(controller.last_vertical_rate_command_m_s, climbing_rate)
+
+    def test_vertical_follow_blends_in_without_first_frame_step(self) -> None:
+        """Переход в FOLLOW не должен сдвигать H_ref в первом же кадре."""
+        controller = VisualServoController(
+            config(
+                vertical_follow_enabled=True,
+                vertical_follow_deadband_deg=0.0,
+                follow_entry_blend_s=0.35,
+            )
+        )
+        frame, channels = rc_frame(throttle=1100)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+
+        controller.process(
+            frame, channels, "FOLLOW", target(0.1, y=-0.5), sensor(0.1), 0.1, armed=True
+        )
+
+        self.assertAlmostEqual(controller.hold_altitude_m or 0.0, 2.0, places=6)
+        self.assertEqual(controller.last_vertical_rate_command_m_s, 0.0)
+
+    def test_invalid_target_angle_returns_control_to_pilot(self) -> None:
+        """Неконечный угол цели безопасно считается потерей цели, а не командой CH3."""
+        controller = VisualServoController(config(vertical_follow_enabled=True))
+        frame, channels = rc_frame(throttle=1100)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.1), sensor(0.1), 0.1, armed=True)
+        reference_before = controller.hold_altitude_m
+        invalid_target = TargetGuidance(
+            True, 0.0, float("nan"), 0.2, "Следить", 0.0, 0.0, 4.0
+        )
+
+        result = controller.process(
+            frame, channels, "FOLLOW", invalid_target, sensor(0.4), 0.4, armed=True
+        )
+
+        self.assertEqual(controller.hold_altitude_m, reference_before)
+        self.assertEqual(result.computed_channels[2], channels[2])
+        self.assertTrue(result.target_lost)
+        self.assertTrue(any("TARGET_VALUES_INVALID" in event for event in result.events))
+
+    def test_vertical_follow_ignores_body_pitch_when_target_is_centered(self) -> None:
+        """Наклон носа вперёд не меняет высоту, если цель уже в центре кадра."""
+        controller = VisualServoController(
+            config(vertical_follow_enabled=True, altitude_kp=100.0)
+        )
+        frame, channels = rc_frame(throttle=1100)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.1), sensor(0.1), 0.1, armed=True)
+
+        result = controller.process(
+            frame,
+            channels,
+            "FOLLOW",
+            target(0.2, y=0.0),
+            sensor(0.2, pitch=7.5),
+            0.2,
+            armed=True,
+        )
+
+        self.assertAlmostEqual(controller.hold_altitude_m or 0.0, 2.0, places=6)
+        self.assertEqual(controller.last_vertical_rate_command_m_s, 0.0)
+        self.assertFalse(any(event.startswith("VERTICAL_FOLLOW:") for event in result.events))
+
+    def test_vertical_follow_compensates_image_roll(self) -> None:
+        """При крене учитывается, что вертикаль кадра повёрнута относительно гравитации."""
+        controller = VisualServoController(
+            config(vertical_follow_enabled=True, altitude_kp=100.0)
+        )
+        frame, channels = rc_frame(throttle=1100)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.1), sensor(0.1), 0.1, armed=True)
+
+        controller.process(
+            frame, channels, "FOLLOW", target(0.2, x=0.4, y=0.0), sensor(0.2, roll=20.0), 0.2, armed=True
+        )
+
+        self.assertNotEqual(controller.last_vertical_world_elevation_deg, 0.0)
+        self.assertNotEqual(controller.hold_altitude_m, 2.0)
+
+    def test_vertical_follow_clamps_altitude_reference_and_pauses_at_large_tilt(self) -> None:
+        """Опорная высота ограничена, а при большом наклоне коррекция замораживается."""
+        controller = VisualServoController(
+            config(
+                vertical_follow_enabled=True,
+                vertical_follow_max_offset_m=0.01,
+                vertical_follow_gain_m_s_per_deg=10.0,
+                vertical_follow_max_rate_m_s=0.5,
+            )
+        )
+        frame, channels = rc_frame(throttle=1100)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.1), sensor(0.1), 0.1, armed=True)
+        controller.process(
+            frame, channels, "FOLLOW", target(0.2, y=-0.5), sensor(0.2), 0.2, armed=True
+        )
+        self.assertLessEqual(abs((controller.hold_altitude_m or 2.0) - 2.0), 0.01)
+        reference_before_pause = controller.hold_altitude_m
+
+        paused = controller.process(
+            frame,
+            channels,
+            "FOLLOW",
+            target(0.4, y=-0.5),
+            sensor(0.4, roll=26.0),
+            0.4,
+            armed=True,
+        )
+        self.assertTrue(any("paused=наклон выше допуска" in event for event in paused.events))
+        self.assertEqual(controller.hold_altitude_m, reference_before_pause)
+
+    def test_vertical_follow_is_disabled_by_default(self) -> None:
+        """Без отдельного разрешения новая вертикальная ось не меняет команды."""
+        controller = VisualServoController(config())
+        frame, channels = rc_frame(throttle=1100)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.1), sensor(0.1), 0.1, armed=True)
+
+        result = controller.process(
+            frame, channels, "FOLLOW", target(0.2, y=-0.5), sensor(0.2), 0.2, armed=True
+        )
+
+        self.assertAlmostEqual(controller.hold_altitude_m or 0.0, 2.0, places=6)
+        self.assertFalse(any(event.startswith("VERTICAL_FOLLOW:") for event in result.events))
+
+    def test_vertical_follow_freezes_reference_when_target_is_lost(self) -> None:
+        """После потери выбранной цели внешний контур не продолжает менять H_ref."""
+        controller = VisualServoController(config(vertical_follow_enabled=True))
+        frame, channels = rc_frame(throttle=1100)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.1), sensor(0.1), 0.1, armed=True)
+        controller.process(
+            frame, channels, "FOLLOW", target(0.2, y=-0.5), sensor(0.2), 0.2, armed=True
+        )
+        reference_before_loss = controller.hold_altitude_m
+
+        lost = controller.process(
+            frame, channels, "FOLLOW", None, sensor(0.3), 0.3, armed=True
+        )
+
+        self.assertTrue(lost.target_lost)
+        self.assertEqual(controller.hold_altitude_m, reference_before_loss)
 
     def test_altitude_priority_weakens_but_does_not_cancel_follow(self) -> None:
         """Ошибка высоты ослабляет дугу, сохраняя FOLLOW и направление к цели."""
@@ -967,6 +1188,7 @@ class VisualServoTests(unittest.TestCase):
         self.assertTrue(loaded.roll_follow_enabled)
         self.assertTrue(loaded.coordinated_yaw_enabled)
         self.assertTrue(loaded.roll_thrust_compensation_enabled)
+        self.assertTrue(loaded.vertical_follow_enabled)
         self.assertAlmostEqual(loaded.roll_follow_deadband, 0.02)
         self.assertAlmostEqual(loaded.roll_follow_max_angle_deg, 14.0)
         self.assertEqual(loaded.roll_rate_max_correction, 160)

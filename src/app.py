@@ -145,6 +145,7 @@ def main() -> int:
         follow_config.verification.method,
         follow_config.verification.adaptation_rate,
         follow_config.verification.foreground_margin_percent,
+        follow_config.verification.continuity_capture_floor_ratio,
     ) if follow_config.verification.enabled and follow_config.verification.method != "disabled" else None
     tracker = TargetTracker(verifier, follow_config.tracker.algorithm)
     range_estimator = TargetRangeEstimator(
@@ -277,7 +278,11 @@ def main() -> int:
                 result = machine.handle(Command.ABORT)
                 message = result.message
                 display_mode = Mode.IDLE
-            if machine.target is not None and machine.mode in (Mode.CAPTURE, Mode.TRACKING):
+            if (
+                machine.target is not None
+                and machine.mode in (Mode.CAPTURE, Mode.TRACKING)
+                and not tracker.holding_last_confirmed_target
+            ):
                 measured_area_percent = tracker.object_area_percent(frame, machine.target)
                 control_area_percent = tracker.frame_fill_percent(frame, machine.target)
                 measurement = range_estimator.update(
@@ -299,6 +304,13 @@ def main() -> int:
                     loss_reason=None,
                     loss_detail=tracker.last_diagnostic_detail,
                 )
+            elif tracker.holding_last_confirmed_target:
+                # При кратком сомнении не освежаем файл состояния и не
+                # пересчитываем дальность по неподтверждённому изображению.
+                # Отдельный CRSF-процесс видит последний подтверждённый снимок
+                # и удерживает прежнее безопасное направление до ответа
+                # проверки или окончательной потери цели.
+                pass
             else:
                 # После отбоя или потери цели мост не должен использовать старые координаты.
                 write_target_guidance(

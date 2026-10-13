@@ -51,6 +51,7 @@ class VerificationConfig:
     max_bad_frames: int
     adaptation_rate: float
     foreground_margin_percent: float
+    continuity_capture_floor_ratio: float
 
 
 @dataclass(frozen=True)
@@ -153,6 +154,7 @@ def load_follow_config(path: str | Path) -> FollowConfig:
                 int(_number(verification, "max_bad_frames")),
                 float(verification.get("adaptation_rate", 0.05)),
                 float(verification.get("foreground_margin_percent", 15.0)),
+                float(verification.get("continuity_capture_floor_ratio", 0.70)),
             ),
             TrackerConfig(str(raw.get("tracker", {}).get("algorithm", "csrt"))),
             CaptureSnapshotConfig(
@@ -194,6 +196,8 @@ def load_follow_config(path: str | Path) -> FollowConfig:
         raise ValueError("adaptation_rate должен быть от 0 до 1")
     if not 0 <= result.verification.foreground_margin_percent < 50:
         raise ValueError("foreground_margin_percent должен быть от 0 до 50")
+    if not 0 < result.verification.continuity_capture_floor_ratio <= 1:
+        raise ValueError("continuity_capture_floor_ratio должен быть больше 0 и не больше 1")
     if result.tracker.algorithm not in {"csrt", "kcf", "mil"}:
         raise ValueError("algorithm должен быть csrt, kcf или mil")
     if not result.capture_snapshot.directory.strip():

@@ -38,6 +38,22 @@ class CaptureBoxTests(unittest.TestCase):
         assert target is not None
         self.assertEqual(target, TargetBox(75.0, 20.0, 20.0, 20.0))
 
+    def test_capture_target_uses_configured_larger_box(self) -> None:
+        """Увеличение рамки в TOML одинаково меняет OSD и область CSRT."""
+        config = OsdConfig(
+            capture_box_size=64,
+            crosshair_arm=8,
+            line_thickness=2,
+            target_point_radius=4,
+            mode_font_scale=0.8,
+            mode_font_thickness=2,
+            message_font_scale=0.55,
+            message_font_thickness=2,
+        )
+        frame = np.zeros((100, 200, 3), dtype=np.uint8)
+        target = center_target(frame, config)
+        self.assertEqual(target, TargetBox(68.0, 18.0, 64.0, 64.0))
+
 
 if __name__ == "__main__":
     unittest.main()

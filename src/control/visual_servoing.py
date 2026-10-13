@@ -131,6 +131,20 @@ class VisualServoConfig:
     hover_learning_max_throttle: int
     # Разрешает немедленный перехват после подтверждённого режима FOLLOW.
     immediate_follow_takeover: bool
+    # Параметры внешнего визуального контура выравнивания цели по высоте.
+    vertical_follow_enabled: bool
+    vertical_follow_deadband_deg: float
+    vertical_follow_error_alpha: float
+    vertical_follow_derivative_alpha: float
+    vertical_follow_gain_m_s_per_deg: float
+    vertical_follow_kd_m_s_per_deg_s: float
+    vertical_follow_max_derivative_deg_s: float
+    vertical_follow_max_rate_m_s: float
+    vertical_follow_max_offset_m: float
+    vertical_follow_direction: float
+    vertical_camera_roll_offset_deg: float
+    vertical_roll_attitude_direction: float
+    vertical_follow_max_tilt_deg: float
 
     def validate(self) -> None:
         """Отклоняет параметры, способные сделать контур непредсказуемым."""
@@ -209,6 +223,27 @@ class VisualServoConfig:
             raise ValueError("Сглаживание и скорость yaw должны быть положительными")
         if not self.rc_min <= self.hover_learning_min_throttle < self.hover_learning_max_throttle <= self.rc_max:
             raise ValueError("Неверный диапазон обучения газа висения")
+        if self.vertical_follow_deadband_deg < 0:
+            raise ValueError("Мёртвая зона вертикального слежения не может быть отрицательной")
+        if not 0 < self.vertical_follow_error_alpha <= 1:
+            raise ValueError("Сглаживание вертикальной ошибки должно быть в диапазоне (0, 1]")
+        if not 0 < self.vertical_follow_derivative_alpha <= 1:
+            raise ValueError("Сглаживание вертикальной производной должно быть в диапазоне (0, 1]")
+        if (
+            self.vertical_follow_gain_m_s_per_deg < 0
+            or self.vertical_follow_kd_m_s_per_deg_s < 0
+            or self.vertical_follow_max_derivative_deg_s <= 0
+            or self.vertical_follow_max_rate_m_s < 0
+        ):
+            raise ValueError("Коэффициент и скорость вертикального слежения не могут быть отрицательными")
+        if self.vertical_follow_max_offset_m < 0:
+            raise ValueError("Предел смещения опорной высоты не может быть отрицательным")
+        if self.vertical_follow_direction not in {-1.0, 1.0}:
+            raise ValueError("Направление вертикальной команды должно быть -1 или 1")
+        if self.vertical_roll_attitude_direction not in {-1.0, 1.0}:
+            raise ValueError("Знак оси roll должен быть -1 или 1")
+        if self.vertical_follow_max_tilt_deg <= 0 or self.vertical_follow_max_tilt_deg > self.max_abs_tilt_deg:
+            raise ValueError("Предел наклона вертикального контура должен быть в допустимом диапазоне")
 
 
 def build_visual_servo_config(
@@ -303,6 +338,19 @@ def build_visual_servo_config(
         hover_learning_min_throttle=int(section["hover_learning_min_throttle"]),
         hover_learning_max_throttle=int(section["hover_learning_max_throttle"]),
         immediate_follow_takeover=bool(section["immediate_follow_takeover"]),
+        vertical_follow_enabled=bool(section["vertical_follow_enabled"]),
+        vertical_follow_deadband_deg=float(section["vertical_follow_deadband_deg"]),
+        vertical_follow_error_alpha=float(section["vertical_follow_error_alpha"]),
+        vertical_follow_derivative_alpha=float(section["vertical_follow_derivative_alpha"]),
+        vertical_follow_gain_m_s_per_deg=float(section["vertical_follow_gain_m_s_per_deg"]),
+        vertical_follow_kd_m_s_per_deg_s=float(section["vertical_follow_kd_m_s_per_deg_s"]),
+        vertical_follow_max_derivative_deg_s=float(section["vertical_follow_max_derivative_deg_s"]),
+        vertical_follow_max_rate_m_s=float(section["vertical_follow_max_rate_m_s"]),
+        vertical_follow_max_offset_m=float(section["vertical_follow_max_offset_m"]),
+        vertical_follow_direction=float(section["vertical_follow_direction"]),
+        vertical_camera_roll_offset_deg=float(section["vertical_camera_roll_offset_deg"]),
+        vertical_roll_attitude_direction=float(section["vertical_roll_attitude_direction"]),
+        vertical_follow_max_tilt_deg=float(section["vertical_follow_max_tilt_deg"]),
     )
     config.validate()
     return config
@@ -331,6 +379,16 @@ class VisualServoController:
         self.state = VisualServoState.DIRECT
         self.hover_reference: float | None = None
         self.hold_altitude_m: float | None = None
+        # Начальная высота FOLLOW служит границей вертикального смещения.
+        self.vertical_altitude_origin_m: float | None = None
+        # Последние измерения нужны для разбора вертикальной оси в журнале.
+        self.last_vertical_camera_elevation_deg: float | None = None
+        self.last_vertical_world_elevation_deg: float | None = None
+        self.last_vertical_elevation_error_deg = 0.0
+        self.last_vertical_error_derivative_deg_s = 0.0
+        self._last_vertical_raw_error_deg: float | None = None
+        self.last_vertical_rate_command_m_s = 0.0
+        self.vertical_follow_pause_reason: str | None = None
         self._reference_started_at: float | None = None
         self._reference_altitudes: list[float] = []
         self._reference_throttles: list[float] = []
@@ -564,6 +622,9 @@ class VisualServoController:
         dt = self._step_time(now)
         ex = float(target.normalized_x or 0.0)
         scale = float(target.scale_percent or cfg.min_scale_percent)
+        entry_authority = self._follow_entry_authority(now)
+        if self.state is VisualServoState.FOLLOW:
+            self._update_vertical_altitude_reference(target, sensor, dt, entry_authority)
         lateral_authority, heading_authority = self._follow_authority(sensor, now)
         desired_roll_target = 0.0
         if self.state is VisualServoState.FOLLOW and cfg.roll_follow_enabled:
@@ -588,7 +649,6 @@ class VisualServoController:
         integral_allowed = self._altitude_is_stable(sensor) and (
             self._state_age(now) >= cfg.altitude_integral_activation_s
         )
-        entry_authority = self._follow_entry_authority(now)
         raw_throttle_command = self._altitude_command(sensor, dt, integrate=integral_allowed)
         # В первом кадре FOLLOW газ равен сохранённой команде пилота. Далее
         # вертикальная поправка плавно включается без ступени тяги.
@@ -669,6 +729,23 @@ class VisualServoController:
                 f"vario={float(sensor.vario_m_s or 0.0):+.2f}m/s "
                 f"hover={self.hover_reference:.0f} raw={raw_throttle_command} CH3={throttle_command}"
             )
+            if cfg.vertical_follow_enabled and self.state is VisualServoState.FOLLOW:
+                pause = (
+                    f" paused={self.vertical_follow_pause_reason}"
+                    if self.vertical_follow_pause_reason
+                    else ""
+                )
+                events.append(
+                    "VERTICAL_FOLLOW: "
+                    f"target_y={float(target.normalized_y):+.3f} "
+                    f"camera_y={self._format_angle(self.last_vertical_camera_elevation_deg)} "
+                    f"gravity_y={self._format_angle(self.last_vertical_world_elevation_deg)} "
+                    f"filtered={self.last_vertical_elevation_error_deg:+.2f}deg "
+                    f"speed={self.last_vertical_error_derivative_deg_s:+.2f}deg/s "
+                    f"rate={self.last_vertical_rate_command_m_s:+.2f}m/s "
+                    f"FC_roll={sensor.roll_deg:+.2f}deg FC_pitch={sensor.pitch_deg:+.2f}deg "
+                    f"H_ref={self.hold_altitude_m:.2f}m{pause}"
+                )
 
         computed_channels = tuple(self._clamp_rc(value) for value in output_channels)
         self.last_control_values = (
@@ -693,6 +770,14 @@ class VisualServoController:
         immediate = cfg.immediate_follow_takeover
         self.state = VisualServoState.FOLLOW if immediate else VisualServoState.ALTITUDE_HOLD
         self.hold_altitude_m = None
+        self.vertical_altitude_origin_m = None
+        self.last_vertical_camera_elevation_deg = None
+        self.last_vertical_world_elevation_deg = None
+        self.last_vertical_elevation_error_deg = 0.0
+        self.last_vertical_error_derivative_deg_s = 0.0
+        self._last_vertical_raw_error_deg = None
+        self.last_vertical_rate_command_m_s = 0.0
+        self.vertical_follow_pause_reason = None
         self._reference_started_at = None if immediate else now
         self._reference_altitudes = []
         self._reference_throttles = []
@@ -718,6 +803,7 @@ class VisualServoController:
             self.forward_pitch_reference_source = "disabled"
         if immediate:
             self.hold_altitude_m, self.hold_altitude_source = self._pilot_altitude_reference(sensor, now)
+            self.vertical_altitude_origin_m = self.hold_altitude_m
         self.altitude_integral = 0.0
         self.last_time = now
         self.last_roll_error = float(target.normalized_x or 0.0)
@@ -755,6 +841,14 @@ class VisualServoController:
         previous = self.state
         self.state = state
         self.hold_altitude_m = None
+        self.vertical_altitude_origin_m = None
+        self.last_vertical_camera_elevation_deg = None
+        self.last_vertical_world_elevation_deg = None
+        self.last_vertical_elevation_error_deg = 0.0
+        self.last_vertical_error_derivative_deg_s = 0.0
+        self._last_vertical_raw_error_deg = None
+        self.last_vertical_rate_command_m_s = 0.0
+        self.vertical_follow_pause_reason = None
         self._reference_started_at = None
         self._reference_altitudes = []
         self._reference_throttles = []
@@ -880,6 +974,15 @@ class VisualServoController:
                 "TARGET_LOST: reason=TARGET_STATE_STALE "
                 f"age={age:.3f}s limit={cfg.target_max_age_s:.3f}s"
             )
+        values = (
+            target.yaw_error_deg,
+            target.pitch_error_deg,
+            target.normalized_x,
+            target.normalized_y,
+            target.scale_percent,
+        )
+        if any(value is None or not math.isfinite(float(value)) for value in values):
+            return "TARGET_LOST: reason=TARGET_VALUES_INVALID"
         if target.normalized_x is None or target.normalized_y is None:
             return "TARGET_LOST: reason=TARGET_COORDINATES_INCOMPLETE"
         if target.scale_percent is None or target.scale_percent < cfg.min_scale_percent:
@@ -946,6 +1049,7 @@ class VisualServoController:
         if now - started_at < cfg.altitude_reference_window_s:
             return False
         self.hold_altitude_m = statistics.median(self._reference_altitudes)
+        self.vertical_altitude_origin_m = self.hold_altitude_m
         self.hover_reference = float(self._clamp_rc(round(statistics.median(self._reference_throttles))))
         pitch_reference = statistics.median(self._reference_pitches)
         if cfg.forward_pitch_reference_enabled:
@@ -972,6 +1076,136 @@ class VisualServoController:
             abs(reference - float(sensor.altitude_m)) <= cfg.altitude_tolerance_m
             and abs(float(sensor.vario_m_s or 0.0)) <= cfg.vario_tolerance_m_s
         )
+
+    def _update_vertical_altitude_reference(
+        self, target: TargetGuidance, sensor: SensorSample, dt: float, entry_authority: float
+    ) -> None:
+        """Плавно смещает H_ref, удерживая цель по вертикали в центре кадра."""
+        cfg = self.config
+        self.vertical_follow_pause_reason = None
+        self.last_vertical_rate_command_m_s = 0.0
+        self.last_vertical_camera_elevation_deg = None
+        self.last_vertical_world_elevation_deg = None
+        if not cfg.vertical_follow_enabled:
+            return
+        if (
+            target.pitch_error_deg is None
+            or target.yaw_error_deg is None
+            or target.normalized_y is None
+            or not all(
+                math.isfinite(float(value))
+                for value in (
+                    target.pitch_error_deg,
+                    target.yaw_error_deg,
+                    target.normalized_y,
+                    sensor.roll_deg,
+                )
+                if value is not None
+            )
+        ):
+            self.vertical_follow_pause_reason = "нет корректных углов цели или FC"
+            self._reset_vertical_error()
+            return
+        if self.vertical_altitude_origin_m is None or self.hold_altitude_m is None:
+            self.vertical_follow_pause_reason = "нет опорной высоты"
+            return
+        if max(abs(sensor.roll_deg or 0.0), abs(sensor.pitch_deg or 0.0)) > cfg.vertical_follow_max_tilt_deg:
+            self.vertical_follow_pause_reason = "наклон выше допуска"
+            # После паузы не применять к текущей цели сглаженную старую ошибку.
+            self._reset_vertical_error()
+            return
+
+        camera_elevation = float(target.pitch_error_deg)
+        elevation_error = self._gravity_aligned_vertical_error_deg(target, sensor)
+        if not math.isfinite(elevation_error):
+            self.vertical_follow_pause_reason = "расчёт вертикальной ошибки некорректен"
+            self._reset_vertical_error()
+            return
+        self.last_vertical_camera_elevation_deg = camera_elevation
+        self.last_vertical_world_elevation_deg = elevation_error
+        if dt <= 0.0 or self._last_vertical_raw_error_deg is None:
+            raw_derivative = 0.0
+        else:
+            raw_derivative = (elevation_error - self._last_vertical_raw_error_deg) / dt
+        self._last_vertical_raw_error_deg = elevation_error
+        raw_derivative = max(
+            -cfg.vertical_follow_max_derivative_deg_s,
+            min(cfg.vertical_follow_max_derivative_deg_s, raw_derivative),
+        )
+        alpha = cfg.vertical_follow_error_alpha
+        self.last_vertical_elevation_error_deg = (
+            alpha * elevation_error + (1.0 - alpha) * self.last_vertical_elevation_error_deg
+        )
+        derivative_alpha = cfg.vertical_follow_derivative_alpha
+        self.last_vertical_error_derivative_deg_s = (
+            derivative_alpha * raw_derivative
+            + (1.0 - derivative_alpha) * self.last_vertical_error_derivative_deg_s
+        )
+        filtered_error = self.last_vertical_elevation_error_deg
+        if abs(filtered_error) <= cfg.vertical_follow_deadband_deg or dt <= 0.0:
+            return
+
+        # Пропорциональный внешний контур задаёт скорость изменения H_ref, а не газ.
+        effective_error = math.copysign(
+            abs(filtered_error) - cfg.vertical_follow_deadband_deg, filtered_error
+        )
+        requested_rate = cfg.vertical_follow_direction * (
+            cfg.vertical_follow_gain_m_s_per_deg * effective_error
+            + cfg.vertical_follow_kd_m_s_per_deg_s * self.last_vertical_error_derivative_deg_s
+        )
+        rate = max(
+            -cfg.vertical_follow_max_rate_m_s,
+            min(cfg.vertical_follow_max_rate_m_s, requested_rate),
+        )
+        lower_limit = self.vertical_altitude_origin_m - cfg.vertical_follow_max_offset_m
+        upper_limit = self.vertical_altitude_origin_m + cfg.vertical_follow_max_offset_m
+        # При входе в FOLLOW опора высоты не должна сдвигаться ступенью.
+        rate *= max(0.0, min(1.0, entry_authority))
+        next_reference = max(
+            lower_limit,
+            min(upper_limit, self.hold_altitude_m + rate * dt),
+        )
+        if next_reference == lower_limit and rate < 0.0:
+            rate = 0.0
+        elif next_reference == upper_limit and rate > 0.0:
+            rate = 0.0
+        self.hold_altitude_m = next_reference
+        self.last_vertical_rate_command_m_s = rate
+
+    def _gravity_aligned_vertical_error_deg(
+        self, target: TargetGuidance, sensor: SensorSample
+    ) -> float:
+        """Разворачивает вертикальную ошибку кадра по крену, не смешивая её с pitch."""
+        cfg = self.config
+        # Луч задан в осях кадра: вперёд, влево, вверх. Нам нужна ошибка
+        # центра изображения относительно гравитационной вертикали. Pitch корпуса
+        # намеренно НЕ прибавляется: при движении вперёд цель в центре кадра
+        # не должна сама вызывать набор или снижение.
+        azimuth = math.radians(float(target.yaw_error_deg))
+        elevation = math.radians(float(target.pitch_error_deg))
+        ray_forward = math.cos(elevation) * math.cos(azimuth)
+        ray_left = -math.cos(elevation) * math.sin(azimuth)
+        ray_up = math.sin(elevation)
+
+        total_roll = math.radians(
+            cfg.vertical_camera_roll_offset_deg
+            + float(sensor.roll_deg or 0.0) * cfg.vertical_roll_attitude_direction
+        )
+        corrected_left = ray_left * math.cos(total_roll) - ray_up * math.sin(total_roll)
+        corrected_up = ray_left * math.sin(total_roll) + ray_up * math.cos(total_roll)
+        horizontal_length = math.hypot(ray_forward, corrected_left)
+        return math.degrees(math.atan2(corrected_up, horizontal_length))
+
+    def _reset_vertical_error(self) -> None:
+        """Сбрасывает память внешнего вертикального контура после недостоверного кадра."""
+        self.last_vertical_elevation_error_deg = 0.0
+        self.last_vertical_error_derivative_deg_s = 0.0
+        self._last_vertical_raw_error_deg = None
+
+    @staticmethod
+    def _format_angle(value: float | None) -> str:
+        """Форматирует необязательный угол для диагностической строки журнала."""
+        return "n/a" if value is None else f"{value:+.2f}deg"
 
     def _follow_authority(self, sensor: SensorSample, now: float) -> tuple[float, float]:
         """Возвращает доли власти боковой дуги и курса по фактической вертикали.

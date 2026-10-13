@@ -15,13 +15,23 @@ class TargetVerifier:
 
     def __init__(self, min_similarity: float = 0.35, max_bad_frames: int = 5,
                  method: str = "appearance", adaptation_rate: float = 0.05,
-                 foreground_margin_percent: float = 15.0) -> None:
-        """Создаёт проверяющий модуль с порогом и запасом кадров."""
+                 foreground_margin_percent: float = 15.0,
+                 continuity_capture_floor_ratio: float = 0.70) -> None:
+        """Создаёт проверяющий модуль с порогом идентичности и непрерывности.
+
+        ``min_similarity`` остаётся строгим уровнем совпадения с исходной
+        целью пилота. Для быстрого движения допускается немного меньшая
+        похожесть на исходный кадр, но только если область одновременно хорошо
+        совпадает с недавно подтверждённым видом той же цели. Это делает
+        сопровождение устойчивее к повороту ладони и смазу, не разрешая
+        рабочей модели самостоятельно выбрать новый объект.
+        """
         self.min_similarity = min_similarity
         self.max_bad_frames = max_bad_frames
         self.method = method
         self.adaptation_rate = adaptation_rate
         self.foreground_margin_percent = foreground_margin_percent
+        self.continuity_capture_floor_ratio = continuity_capture_floor_ratio
         # Исходный образец никогда не изменяется: он не даёт адаптивному
         # трекеру постепенно принять фон за первоначально выбранную цель.
         self._capture_template: Any = None
@@ -180,12 +190,21 @@ class TargetVerifier:
         )
         self.last_capture_similarity = capture_similarity
         self.last_adaptive_similarity = adaptive_similarity
-        # Адаптация допустима только пока область похожа одновременно на то,
-        # что выбрал пилот, и на текущий рабочий вид этой же цели.
-        if (
+        # Строгое совпадение — обычный случай. Непрерывное совпадение
+        # предназначено для быстрого движения: оно принимает только область,
+        # которая всё ещё достаточно похожа на неизменяемую модель захвата И
+        # хорошо похожа на подтверждённый недавний вид той же цели. Одной
+        # адаптивной модели никогда недостаточно для принятия нового объекта.
+        capture_floor = self.min_similarity * self.continuity_capture_floor_ratio
+        strict_match = (
             capture_similarity >= self.min_similarity
             and adaptive_similarity >= self.min_similarity
-        ):
+        )
+        continuity_match = (
+            capture_similarity >= capture_floor
+            and adaptive_similarity >= self.min_similarity
+        )
+        if strict_match or continuity_match:
             self._bad_frames = 0
             self.last_failure_reason = None
             if self.method == "adaptive":
@@ -197,11 +216,16 @@ class TargetVerifier:
                                                    histogram, rate, 0)
             return True
         self._bad_frames += 1
+        # Управление нельзя продолжать по координатам, которые проверка уже
+        # признала сомнительными. Раньше VERIFIER_GRACE пропускал такие кадры
+        # в FOLLOW до истечения счётчика и CSRT мог увести дрон за фоном.
+        # Счётчик сохраняем только в диагностике: он показывает, единичный ли
+        # это срыв, но не задерживает немедленный возврат пилоту.
         if self._bad_frames >= self.max_bad_frames:
             self.last_failure_reason = "VERIFIER_REJECTED"
-            return False
-        self.last_failure_reason = "VERIFIER_GRACE"
-        return True
+        else:
+            self.last_failure_reason = "VERIFIER_UNCERTAIN"
+        return False
 
     def diagnostic_detail(self) -> str:
         """Возвращает компактное объяснение последней проверки для журнала."""
@@ -209,7 +233,8 @@ class TargetVerifier:
         adaptive = "n/a" if self.last_adaptive_similarity is None else f"{self.last_adaptive_similarity:.3f}"
         return (
             f"capture_similarity={capture} adaptive_similarity={adaptive} "
-            f"bad_frames={self._bad_frames}/{self.max_bad_frames}"
+            f"bad_frames={self._bad_frames}/{self.max_bad_frames} "
+            f"capture_floor={self.min_similarity * self.continuity_capture_floor_ratio:.3f}"
         )
 
     @staticmethod

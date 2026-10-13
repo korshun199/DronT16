@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -40,12 +41,17 @@ class TargetGuidance:
 
     def is_complete(self, now: float, max_age_s: float, min_scale_percent: float) -> bool:
         """Проверяет свежесть всех признаков, нужных visual_servoing."""
+        values = (
+            self.yaw_error_deg,
+            self.pitch_error_deg,
+            self.normalized_x,
+            self.normalized_y,
+            self.scale_percent,
+        )
         return (
             self.is_fresh(now, max_age_s)
-            and self.normalized_x is not None
-            and self.normalized_y is not None
-            and self.scale_percent is not None
-            and self.scale_percent >= min_scale_percent
+            and all(value is not None and math.isfinite(float(value)) for value in values)
+            and float(self.scale_percent) >= min_scale_percent
         )
 
 

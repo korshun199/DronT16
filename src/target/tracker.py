@@ -39,6 +39,11 @@ class TargetTracker:
         self._tracker: Optional[Any] = None
         self._verifier = verifier
         self._algorithm = algorithm
+        # Последняя подтверждённая рамка остаётся единственным безопасным
+        # источником направления на короткой паузе проверки. Координаты
+        # сомнительного кадра CSRT никогда не попадают в FOLLOW.
+        self._last_confirmed_target: Optional[TargetBox] = None
+        self._holding_last_confirmed_target = False
         # Последняя причина остановки сопровождения передаётся в общий журнал.
         self.last_failure_reason: str | None = None
         self.last_diagnostic_detail = "tracker=not_started"
@@ -57,6 +62,8 @@ class TargetTracker:
             raise RuntimeError("OpenCV не смог инициализировать сопровождение")
         if self._verifier is not None:
             self._verifier.start(frame, target)
+        self._last_confirmed_target = target
+        self._holding_last_confirmed_target = False
         self.last_failure_reason = None
         self.last_diagnostic_detail = "tracker=started"
 
@@ -69,6 +76,8 @@ class TargetTracker:
         success, box = self._tracker.update(frame)
         if not success:
             self._tracker = None
+            self._last_confirmed_target = None
+            self._holding_last_confirmed_target = False
             self.last_failure_reason = "TRACKER_UPDATE_FAILED"
             self.last_diagnostic_detail = "csrt_update=false"
             return None
@@ -83,6 +92,8 @@ class TargetTracker:
             or target.y + target.height > frame_height
         ):
             self._tracker = None
+            self._last_confirmed_target = None
+            self._holding_last_confirmed_target = False
             self.last_failure_reason = "TARGET_OUT_OF_FRAME"
             self.last_diagnostic_detail = (
                 f"box=({target.x:.1f},{target.y:.1f},{target.width:.1f},{target.height:.1f}) "
@@ -90,9 +101,25 @@ class TargetTracker:
             )
             return None
         if self._verifier is not None and not self._verifier.verify(frame, target):
+            verifier_reason = self._verifier.last_failure_reason or "VERIFIER_REJECTED"
+            verifier_detail = self._verifier.diagnostic_detail()
+            # Краткий смаз или перекрытие цели не должны срывать FOLLOW. Пока
+            # не исчерпан разрешённый запас кадров, сохраняем последнюю
+            # подтверждённую рамку. Это удерживает прежнюю безопасную команду,
+            # но исключает передачу в управление новых сомнительных координат.
+            if (
+                verifier_reason == "VERIFIER_UNCERTAIN"
+                and self._last_confirmed_target is not None
+            ):
+                self._holding_last_confirmed_target = True
+                self.last_failure_reason = "VERIFIER_GRACE"
+                self.last_diagnostic_detail = f"{verifier_detail} action=hold_last_confirmed"
+                return self._last_confirmed_target
             self._tracker = None
-            self.last_failure_reason = self._verifier.last_failure_reason or "VERIFIER_REJECTED"
-            self.last_diagnostic_detail = self._verifier.diagnostic_detail()
+            self._last_confirmed_target = None
+            self._holding_last_confirmed_target = False
+            self.last_failure_reason = verifier_reason
+            self.last_diagnostic_detail = verifier_detail
             return None
         detail = (
             f"box=({target.x:.1f},{target.y:.1f},{target.width:.1f},{target.height:.1f}) "
@@ -100,6 +127,8 @@ class TargetTracker:
         )
         if self._verifier is not None:
             detail = f"{detail} {self._verifier.diagnostic_detail()}"
+        self._last_confirmed_target = target
+        self._holding_last_confirmed_target = False
         self.last_failure_reason = None
         self.last_diagnostic_detail = detail
         return target
@@ -116,9 +145,16 @@ class TargetTracker:
             return None
         return self._verifier.frame_fill_percent(frame, target)
 
+    @property
+    def holding_last_confirmed_target(self) -> bool:
+        """Показывает, что FOLLOW ждёт подтверждения без новых видеоданных."""
+        return self._holding_last_confirmed_target
+
     def reset(self) -> None:
         """Останавливает текущее сопровождение без выбора новой цели."""
         self._tracker = None
+        self._last_confirmed_target = None
+        self._holding_last_confirmed_target = False
         if self._verifier is not None:
             self._verifier.reset()
         self.last_failure_reason = None
