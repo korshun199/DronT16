@@ -123,6 +123,11 @@ def config(**overrides: object) -> VisualServoConfig:
         "vertical_follow_direction": 1.0,
         "vertical_camera_roll_offset_deg": 0.0,
         "vertical_roll_attitude_direction": 1.0,
+        "vertical_camera_pitch_offset_deg": 0.0,
+        "vertical_pitch_attitude_direction": 1.0,
+        "vertical_follow_pitch_kp": 0.35,
+        "vertical_follow_pitch_max_correction_deg": 4.0,
+        "vertical_follow_pitch_direction": 1.0,
         "vertical_follow_max_tilt_deg": 25.0,
     }
     values.update(overrides)
@@ -217,7 +222,7 @@ class VisualServoTests(unittest.TestCase):
         self.assertGreater(controller.hold_altitude_m or 0.0, 2.0)
         self.assertGreater(result.computed_channels[2], channels[2])
         self.assertEqual(result.computed_channels[0], channels[0])
-        self.assertEqual(result.computed_channels[1], channels[1])
+        self.assertLess(result.computed_channels[1], channels[1])
         self.assertEqual(result.computed_channels[3], channels[3])
         report = controller.process(
             frame, channels, "FOLLOW", target(0.4, y=-0.5), sensor(0.4), 0.4, armed=True
@@ -306,8 +311,8 @@ class VisualServoTests(unittest.TestCase):
         self.assertTrue(result.target_lost)
         self.assertTrue(any("TARGET_VALUES_INVALID" in event for event in result.events))
 
-    def test_vertical_follow_ignores_body_pitch_when_target_is_centered(self) -> None:
-        """Наклон носа вперёд не меняет высоту, если цель уже в центре кадра."""
+    def test_vertical_follow_uses_actual_pitch_to_hold_capture_ray(self) -> None:
+        """Изменение pitch после захвата переводится в пространственную дугу."""
         controller = VisualServoController(
             config(vertical_follow_enabled=True, altitude_kp=100.0)
         )
@@ -325,9 +330,45 @@ class VisualServoTests(unittest.TestCase):
             armed=True,
         )
 
+        self.assertGreater(controller.hold_altitude_m or 0.0, 2.0)
+        self.assertGreater(controller.last_vertical_rate_command_m_s, 0.0)
+        self.assertLess(controller.last_vertical_pitch_correction_deg, 0.0)
+
+    def test_vertical_follow_keeps_original_capture_ray_not_screen_center(self) -> None:
+        """Цель выше центра при захвате не создаёт набор, пока её луч не изменился."""
+        controller = VisualServoController(
+            config(vertical_follow_enabled=True, altitude_kp=100.0)
+        )
+        frame, channels = rc_frame(throttle=1100)
+        captured_target = target(0.1, y=-0.45)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+        controller.process(
+            frame, channels, "FOLLOW", captured_target, sensor(0.1), 0.1, armed=True
+        )
+
+        controller.process(
+            frame, channels, "FOLLOW", target(0.2, y=-0.45), sensor(0.2), 0.2, armed=True
+        )
+
         self.assertAlmostEqual(controller.hold_altitude_m or 0.0, 2.0, places=6)
         self.assertEqual(controller.last_vertical_rate_command_m_s, 0.0)
-        self.assertFalse(any(event.startswith("VERTICAL_FOLLOW:") for event in result.events))
+
+    def test_vertical_follow_target_below_adds_controlled_dive_pitch(self) -> None:
+        """Цель ниже исходного луча снижает H_ref и добавляет ограниченный pitch вниз."""
+        controller = VisualServoController(
+            config(vertical_follow_enabled=True, altitude_kp=100.0, vertical_follow_deadband_deg=0.0)
+        )
+        frame, channels = rc_frame(throttle=1100)
+        controller.process(frame, channels, "DIRECT", None, sensor(0.0), 0.0, armed=True)
+        controller.process(frame, channels, "FOLLOW", target(0.1), sensor(0.1), 0.1, armed=True)
+
+        result = controller.process(
+            frame, channels, "FOLLOW", target(0.2, y=0.5), sensor(0.2), 0.2, armed=True
+        )
+
+        self.assertLess(controller.hold_altitude_m or 2.0, 2.0)
+        self.assertGreater(controller.last_vertical_pitch_correction_deg, 0.0)
+        self.assertGreater(result.computed_channels[1], channels[1])
 
     def test_vertical_follow_compensates_image_roll(self) -> None:
         """При крене учитывается, что вертикаль кадра повёрнута относительно гравитации."""
@@ -1193,6 +1234,9 @@ class VisualServoTests(unittest.TestCase):
         self.assertAlmostEqual(loaded.vertical_follow_gain_m_s_per_deg, 0.04)
         self.assertAlmostEqual(loaded.vertical_follow_max_rate_m_s, 0.20)
         self.assertAlmostEqual(loaded.vertical_follow_max_offset_m, 0.50)
+        self.assertAlmostEqual(loaded.vertical_camera_pitch_offset_deg, 0.0)
+        self.assertAlmostEqual(loaded.vertical_follow_pitch_kp, 0.35)
+        self.assertAlmostEqual(loaded.vertical_follow_pitch_max_correction_deg, 4.0)
         self.assertAlmostEqual(loaded.roll_follow_deadband, 0.02)
         self.assertAlmostEqual(loaded.roll_follow_max_angle_deg, 14.0)
         self.assertEqual(loaded.roll_rate_max_correction, 160)
